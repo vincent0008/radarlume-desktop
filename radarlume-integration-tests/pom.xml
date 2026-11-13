@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent><groupId>io.radarlume</groupId><artifactId>radarlume-parent</artifactId><version>0.1.0-SNAPSHOT</version></parent>
+  <artifactId>radarlume-integration-tests</artifactId>
+  <dependencies>
+    <dependency><groupId>io.radarlume</groupId><artifactId>radarlume-domain</artifactId><version>${project.version}</version></dependency>
+    <dependency><groupId>io.radarlume</groupId><artifactId>radarlume-application</artifactId><version>${project.version}</version></dependency>
+    <dependency><groupId>io.radarlume</groupId><artifactId>radarlume-process</artifactId><version>${project.version}</version></dependency>
+    <dependency><groupId>io.radarlume</groupId><artifactId>radarlume-adapter-adb</artifactId><version>${project.version}</version></dependency>
+    <dependency><groupId>io.radarlume</groupId><artifactId>radarlume-adapter-network</artifactId><version>${project.version}</version></dependency>
+    <dependency><groupId>io.radarlume</groupId><artifactId>radarlume-adapter-storage</artifactId><version>${project.version}</version></dependency>
+
+  </dependencies>
+  <build><plugins><plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-failsafe-plugin</artifactId><executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions></plugin></plugins></build>
+</project>
