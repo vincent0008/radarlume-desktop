@@ -1,0 +1,6 @@
+.root { -fx-font-family: "Segoe UI", sans-serif; -fx-font-size: 13px; -fx-base: #edf2f7; -fx-background: #f5f8fc; -fx-accent: #157d8b; }
+.title { -fx-font-size: 30px; -fx-font-weight: bold; -fx-text-fill: #124b61; }
+.button { -fx-padding: 8 14; -fx-cursor: hand; }
+.table-view { -fx-background-color: white; -fx-border-color: #d6e1eb; }
+.tab-pane > .tab-header-area .tab-header-background { -fx-background-color: #dfe9f2; }
+.label { -fx-text-fill: #243c50; }
