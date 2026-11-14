@@ -18,6 +18,7 @@ class DesktopSmokeTest {
         CountDownLatch ready = new CountDownLatch(1);
         Platform.startup(ready::countDown); assertTrue(ready.await(10, TimeUnit.SECONDS));
         FutureTask<Void> test = new FutureTask<>(() -> {
+            System.setProperty("radarlume.dataDir", Files.createTempDirectory("radarlume-ui-").toString());
             var app = new RadarLumeApplication(); var stage = new Stage();
             try {
                 app.start(stage); assertTrue(stage.isShowing());

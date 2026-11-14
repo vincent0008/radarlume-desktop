@@ -2,7 +2,16 @@
 
 Primo MVP diagnostico desktop, Java 21 e JavaFX. Raccoglie un inventario Android tramite ADB autorizzato e importa metadati di rete da catture PCAP/PCAPNG con TShark. Il nome provvisorio del progetto era Sentinel Desktop.
 
-**Questo MVP non è un antivirus e non certifica l'assenza di malware o intercettazioni.** Non contiene ancora regole IOC, analisi APK o correlazione app/connessioni. Un errore di raccolta non viene trasformato in un risultato rassicurante.
+**Questo MVP non è un antivirus e non certifica l'assenza di malware o intercettazioni.** Include due controlli Android contestuali (patch datate e accessibilità configurata). Non contiene ancora regole IOC, analisi APK o correlazione app/connessioni. Un errore di raccolta non viene trasformato in un risultato rassicurante.
+
+## Nuovo incremento: impostazioni ed evidenze
+
+In **Impostazioni e dati**, modifica ADB/TShark e premi **Salva percorsi**. I valori vengono conservati nella tabella `tool_settings` e caricati al riavvio. Precedenza: valori salvati, variabili d'ambiente, nomi predefiniti. Il salvataggio verifica il formato, non l'esistenza o l'identità degli eseguibili. La cancellazione degli inventari conserva le impostazioni. La migrazione v1 → v2 conserva gli inventari esistenti; non riaprire il database migrato con la vecchia versione dell'app.
+
+In **Android**, seleziona il dispositivo, conferma l'autorizzazione e premi **Controlli Android**. Si raccolgono versione, SDK, patch e servizi di accessibilità configurati. La finestra mostra fonti, timestamp, regole versionate, gravità e confidenza; i dati mancanti sono espliciti. Questi controlli restano in memoria: **Salva inventario locale** non salva le evidenze. Non includono ancora metadati e permessi delle singole app.
+
+- [Guida pratica per iniziare](docs/GUIDA-PRATICA.md)
+- [Architettura e stato dei 24 punti](docs/ARCHITETTURA-E-PIANO.md)
 
 ## Funzionalità
 
@@ -20,7 +29,7 @@ Primo MVP diagnostico desktop, Java 21 e JavaFX. Raccoglie un inventario Android
 - [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools) per ADB. Su Windows può servire il driver USB del produttore.
 - [Wireshark / TShark](https://www.wireshark.org/download.html) soltanto per importare catture. Nessuna cattura live in questa versione.
 
-ADB e TShark non vengono installati automaticamente. In **Impostazioni e dati** inserisci il percorso completo dell'eseguibile, senza virgolette o argomenti; sono supportati percorsi con spazi. Le impostazioni valgono per la sessione. Per i valori iniziali usa le variabili d'ambiente `RADARLUME_ADB` e `RADARLUME_TSHARK` oppure rendi i comandi disponibili nel `PATH`.
+ADB e TShark non vengono installati automaticamente. In **Impostazioni e dati** inserisci il percorso completo dell'eseguibile, senza virgolette o argomenti; sono supportati percorsi con spazi. Premi **Salva percorsi** per conservarli. In assenza di impostazioni salvate puoi usare `RADARLUME_ADB` e `RADARLUME_TSHARK` oppure rendere i comandi disponibili nel `PATH`.
 
 ## Build, test e avvio
 

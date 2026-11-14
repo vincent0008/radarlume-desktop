@@ -8,7 +8,7 @@ import java.time.Instant;
 import java.util.*;
 
 /** Opens one connection per operation. Schema v1 and inventory writes are transactional. */
-public final class SqliteInventoryRepository implements InventoryRepository {
+public final class SqliteInventoryRepository implements InventoryRepository, SettingsRepository {
     private final Path file;
     public SqliteInventoryRepository(Path file) { this.file = file.toAbsolutePath(); }
     private Connection open() throws SQLException, IOException {
@@ -19,15 +19,31 @@ public final class SqliteInventoryRepository implements InventoryRepository {
             s.execute("PRAGMA secure_delete=ON");
             int version;
             try (ResultSet r = s.executeQuery("PRAGMA user_version")) { version = r.getInt(1); }
-            if (version > 1) throw new SQLException("Schema database più recente dell'applicazione");
+            if (version > 2) throw new SQLException("Schema database più recente dell'applicazione");
             if (version == 0) {
                 c.setAutoCommit(false);
                 s.executeUpdate("CREATE TABLE IF NOT EXISTS inventories (id TEXT PRIMARY KEY, collected_at TEXT NOT NULL, serial TEXT NOT NULL, model TEXT NOT NULL)");
                 s.executeUpdate("CREATE TABLE IF NOT EXISTS apps (inventory_id TEXT NOT NULL REFERENCES inventories(id) ON DELETE CASCADE, package_name TEXT NOT NULL, system INTEGER NOT NULL CHECK(system IN (0,1)), PRIMARY KEY(inventory_id,package_name))");
                 s.execute("PRAGMA user_version=1"); c.commit(); c.setAutoCommit(true);
             }
+            if (version < 2) {
+                c.setAutoCommit(false);
+                s.executeUpdate("CREATE TABLE IF NOT EXISTS tool_settings (id INTEGER PRIMARY KEY CHECK(id=1), adb TEXT NOT NULL, tshark TEXT NOT NULL)");
+                s.execute("PRAGMA user_version=2"); c.commit(); c.setAutoCommit(true);
+            }
             return c;
         } catch (SQLException | RuntimeException e) { c.close(); throw e; }
+    }
+    @Override public Optional<ToolSettings> loadSettings() {
+        if (!Files.exists(file)) return Optional.empty();
+        try (Connection c = open(); Statement s = c.createStatement(); ResultSet r = s.executeQuery("SELECT adb,tshark FROM tool_settings WHERE id=1")) {
+            return r.next() ? Optional.of(new ToolSettings(r.getString(1), r.getString(2))) : Optional.empty();
+        } catch (SQLException | IOException e) { throw new ScanException("Impossibile caricare i percorsi salvati.", e); }
+    }
+    @Override public void saveSettings(ToolSettings settings) {
+        try (Connection c = open(); PreparedStatement s = c.prepareStatement("INSERT INTO tool_settings VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET adb=excluded.adb,tshark=excluded.tshark")) {
+            s.setString(1, settings.adb()); s.setString(2, settings.tshark()); s.executeUpdate();
+        } catch (SQLException | IOException e) { throw new ScanException("Salvataggio percorsi non riuscito.", e); }
     }
     @Override public void save(Inventory inventory) {
         try (Connection c = open()) {

@@ -1,6 +1,8 @@
 package io.radarlume.desktop;
 
 import io.radarlume.adb.AdbDeviceInspector;
+import io.radarlume.adb.AdbSecurityEvidenceCollector;
+import io.radarlume.application.AndroidAssessmentService;
 import io.radarlume.application.DeviceScanService;
 import io.radarlume.domain.*;
 import io.radarlume.network.TsharkTrafficAnalyzer;
@@ -38,10 +40,12 @@ public final class RadarLumeApplication extends Application {
     private Inventory inventory;
     private Task<?> active;
     private InventoryRepository repository;
+    private SettingsRepository settingsRepository;
 
     @Override public void start(Stage stage) {
         Path db = Path.of(System.getProperty("radarlume.dataDir", Path.of(System.getProperty("user.home"), ".radarlume").toString()), "inventories.db");
         repository = new SqliteInventoryRepository(db);
+        settingsRepository = (SettingsRepository) repository;
         Label title = new Label("RadarLume"); title.getStyleClass().add("title");
         Label subtitle = new Label("Dispositivi Android · Inventario app · Analisi PCAP offline");
         Label scope = new Label("MVP diagnostico: i risultati non attestano l'assenza di malware. Nessun dato viene inviato a servizi cloud.");
@@ -58,6 +62,10 @@ public final class RadarLumeApplication extends Application {
         Scene scene = new Scene(root, 1080, 740);
         scene.getStylesheets().add(getClass().getResource("/radarlume.css").toExternalForm());
         stage.setTitle("RadarLume Desktop · MVP 0.1"); stage.setMinWidth(820); stage.setMinHeight(580); stage.setScene(scene); stage.show();
+        run("Caricamento impostazioni…", settingsRepository::loadSettings, saved -> {
+            saved.ifPresent(value -> { adbPath.setText(value.adb()); tsharkPath.setText(value.tshark()); });
+            status.setText(saved.isPresent() ? "Percorsi salvati caricati. Pronto." : "Pronto. Configura e salva i percorsi degli strumenti.");
+        });
     }
     private Tab tab(String title, javafx.scene.Node content) { Tab tab = new Tab(title, content); tab.setClosable(false); return tab; }
     private DeviceScanService service() {
@@ -98,7 +106,29 @@ public final class RadarLumeApplication extends Application {
         table.getColumns().add(column("Tipo", a -> a.system() ? "Sistema" : "Utente", 160));
         table.setPlaceholder(new Label("L'inventario apparirà qui dopo una lettura autorizzata."));
         Label note = new Label("Nomi tecnici dei pacchetti e classificazione sistema/utente. Nessuna analisi dei permessi o verdetto malware in questa versione."); note.setWrapText(true);
-        VBox pane = pane(new HBox(12, discover, devices), consent, new HBox(12, scan, save), inventoryLabel, filter, table, note);
+        Button assess = new Button("Controlli Android");
+        assess.disableProperty().bind(busy.or(consent.selectedProperty().not()).or(devices.valueProperty().isNull()));
+        assess.setOnAction(event -> {
+            String serial = devices.getValue().serial(); boolean authorized = consent.isSelected();
+            String adb = tool(adbPath); var runner = new BoundedProcessRunner(1024 * 1024);
+            var service = new AndroidAssessmentService(new AdbDeviceInspector(adb, runner),
+                new AdbSecurityEvidenceCollector(adb, runner, Clock.systemUTC()), Clock.systemUTC());
+            run("Raccolta evidenze Android…", () -> service.assess(serial, authorized), result -> {
+                StringBuilder text = new StringBuilder("Dispositivo: " + result.serial() + "\nRisultati in memoria, non salvati nello storico.\n\nEVIDENZE\n");
+                result.evidence().forEach(e -> text.append(e.key()).append(": ").append(e.status() == Evidence.Status.AVAILABLE ? e.value() : "NON DISPONIBILE")
+                    .append("\nFonte: ").append(e.source()).append("\nData UTC: ").append(e.collectedAt()).append("\n\n"));
+                text.append("VALUTAZIONI\n");
+                result.findings().forEach(f -> text.append(f.ruleId()).append(" v").append(f.ruleVersion()).append(" · ").append(f.severity())
+                    .append(" · confidenza ").append(f.confidence()).append(" · evidenza ").append(f.evidenceKey())
+                    .append("\n").append(f.explanation()).append("\n").append(f.nextStep()).append("\n\n"));
+                text.append("Nessun verdetto di assenza di malware: questi controlli coprono solo patch dichiarate e servizi di accessibilità configurati.");
+                TextArea area = new TextArea(text.toString()); area.setEditable(false); area.setWrapText(true); area.setPrefSize(780,500);
+                Dialog<Void> dialog = new Dialog<>(); dialog.setTitle("Evidenze e controlli Android"); dialog.getDialogPane().setContent(area);
+                dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE); dialog.setResizable(true); dialog.show();
+                status.setText("Controlli completati: " + result.findings().size() + " osservazioni. Nessun verdetto malware.");
+            });
+        });
+        VBox pane = pane(new HBox(12, discover, devices), consent, new HBox(12, scan, save, assess), inventoryLabel, filter, table, note);
         VBox.setVgrow(table, Priority.ALWAYS); return pane;
     }
     private VBox networkPane(Stage stage) {
@@ -136,7 +166,14 @@ public final class RadarLumeApplication extends Application {
         });
         Label privacy = new Label("Salvataggio solo su richiesta. SQLite contiene seriale, modello, data e nomi dei pacchetti in chiaro. Proteggi l'account del PC e usa la cifratura del disco se necessaria. I dati PCAP non vengono salvati nel database. La cancellazione non rimuove eventuali backup del sistema."); privacy.setWrapText(true);
         Label location = new Label("Database: " + db); location.setWrapText(true);
-        return pane(tools, new Label("ADB"), adbPath, new Label("TShark"), tsharkPath, new Separator(), location, privacy, history, delete);
+        Button savePaths = button("Salva percorsi", () -> {
+            try {
+                ToolSettings settings = new ToolSettings(tool(adbPath), tool(tsharkPath));
+                run("Salvataggio percorsi…", () -> { settingsRepository.saveSettings(settings); return settings; },
+                    saved -> status.setText("Percorsi salvati. Saranno caricati al prossimo avvio."));
+            } catch (ScanException error) { status.setText(error.getMessage()); }
+        });
+        return pane(tools, new Label("ADB"), adbPath, new Label("TShark"), tsharkPath, savePaths, new Separator(), location, privacy, history, delete);
     }
     private void clearInventory() { inventory = null; apps.clear(); savable.set(false); inventoryLabel.setText("Nessun inventario acquisito"); }
     private void showInventory(Inventory value, boolean historical) {
