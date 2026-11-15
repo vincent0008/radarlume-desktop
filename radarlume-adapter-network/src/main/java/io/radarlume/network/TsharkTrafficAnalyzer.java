@@ -31,7 +31,7 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
             "tcp.srcport", "tcp.dstport", "udp.srcport", "udp.dstport",
             "frame.len", "ip.len", "ipv6.plen",
             "dns.qry.name", "dns.flags.response", "dns.a", "dns.aaaa",
-            "tls.handshake.extensions_server_name", "eth.trailer");
+            "tls.handshake.extensions_server_name", "eth.trailer", "http.host");
     /** ICMP errors quote the header of the packet they refer to: without the exclusion they would create fake flows. */
     private static final String FILTER = "(ip or ipv6) and (tcp or udp) and not icmp and not icmpv6";
     /** Magic number that opens the metadata PCAPdroid appends to each packet when its extensions are enabled. */
@@ -98,7 +98,7 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
         long packets, bytes;
         Instant first, last;
         CaptureApp app;
-        String serverName = "";
+        String serverName = "", httpHost = "";
     }
 
     private static final class DnsTotals {
@@ -142,6 +142,7 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
                 if (flow.first == null || time.isBefore(flow.first)) flow.first = time;
                 if (flow.last == null || time.isAfter(flow.last)) flow.last = time;
                 if (flow.serverName.isEmpty()) flow.serverName = name(first(f[16]));
+                if (flow.httpHost.isEmpty()) flow.httpHost = name(hostOnly(first(f[18])));
 
                 CaptureApp app = pcapdroidApp(f[17]);
                 if (app != null || f[17].replace(":", "").contains(PCAPDROID_MAGIC)) trailerSeen = true;
@@ -185,7 +186,7 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
                 trailerSeen ? CaptureAnalysis.AppMetadata.PCAPDROID_TRAILER : CaptureAnalysis.AppMetadata.NONE, truncated,
                 flows.entrySet().stream().map(e -> new NetworkFlow(e.getKey().src(), e.getKey().dst(), e.getKey().protocol(),
                         e.getKey().sport(), e.getKey().dport(), e.getValue().packets, e.getValue().bytes,
-                        e.getValue().first, e.getValue().last, e.getValue().app, e.getValue().serverName)).toList(),
+                        e.getValue().first, e.getValue().last, e.getValue().app, e.getValue().serverName, e.getValue().httpHost)).toList(),
                 dns.entrySet().stream().map(e -> new DnsName(e.getKey(), e.getValue().queries, e.getValue().responses,
                         List.copyOf(e.getValue().addresses), e.getValue().first, e.getValue().last)).toList(),
                 warnings);
@@ -194,6 +195,12 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
     private static String first(String aggregated) {
         int comma = aggregated.indexOf(',');
         return comma < 0 ? aggregated : aggregated.substring(0, comma);
+    }
+
+    /** The Host header may carry a port ("example.test:8080"); bracketed IPv6 literals are left to the name check. */
+    private static String hostOnly(String host) {
+        int colon = host.lastIndexOf(':');
+        return colon > 0 && !host.startsWith("[") ? host.substring(0, colon) : host;
     }
 
     private static boolean isTrue(String value) { return value.equalsIgnoreCase("true") || value.equals("1"); }

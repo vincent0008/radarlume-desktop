@@ -4,6 +4,7 @@ import io.radarlume.adb.AdbDeviceInspector;
 import io.radarlume.adb.AdbSecurityEvidenceCollector;
 import io.radarlume.application.AndroidAssessmentService;
 import io.radarlume.application.DeviceScanService;
+import io.radarlume.application.NetworkAssessmentService;
 import io.radarlume.domain.*;
 import io.radarlume.network.TsharkTrafficAnalyzer;
 import io.radarlume.process.BoundedProcessRunner;
@@ -21,6 +22,7 @@ import javafx.stage.*;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 import java.util.function.*;
 
@@ -38,6 +40,9 @@ public final class RadarLumeApplication extends Application {
     private static final java.time.format.DateTimeFormatter TIME = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(java.time.ZoneOffset.UTC);
     private final ObservableList<NetworkFlow> flows = FXCollections.observableArrayList();
     private final ObservableList<DnsName> dnsNames = FXCollections.observableArrayList();
+    private static final String NO_FINDINGS_YET = "Le osservazioni appariranno qui dopo l'importazione di una cattura.";
+    private final TextArea networkFindings = new TextArea(NO_FINDINGS_YET);
+    private final TabPane results = new TabPane();
     private final BooleanProperty savable = new SimpleBooleanProperty();
     private final Label inventoryLabel = new Label("Nessun inventario acquisito");
     private final Label networkLabel = new Label("Nessuna cattura importata");
@@ -147,12 +152,15 @@ public final class RadarLumeApplication extends Application {
             chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Catture di rete", "*.pcap", "*.pcapng", "*.cap"));
             var file = chooser.showOpenDialog(stage); if (file == null) return;
             var analyzer = new TsharkTrafficAnalyzer(tool(tsharkPath), new BoundedProcessRunner(TSHARK_OUTPUT_LIMIT));
-            flows.clear(); dnsNames.clear(); networkLabel.setText("Nessuna analisi completata");
-            run("Analisi cattura…", () -> analyzer.analyze(file.toPath()), result -> {
+            flows.clear(); dnsNames.clear(); networkFindings.setText(NO_FINDINGS_YET); networkLabel.setText("Nessuna analisi completata");
+            run("Analisi cattura…", () -> { var analysis = analyzer.analyze(file.toPath()); return Map.entry(analysis, NetworkAssessmentService.evaluate(analysis)); }, done -> {
+                CaptureAnalysis result = done.getKey(); List<Finding> findings = done.getValue();
                 flows.setAll(result.flows()); dnsNames.setAll(result.dnsNames()); networkLabel.setText(describe(result));
+                networkFindings.setText(describe(findings)); results.getSelectionModel().selectFirst();
+                long toCheck = findings.stream().filter(f -> f.ruleId().startsWith("NET-")).count();
                 status.setText(result.packets() == 0 ? "Nessun pacchetto TCP/UDP IP decodificabile. Non è un giudizio di sicurezza."
                         : (result.truncated() ? "Importazione PARZIALE (file troncato). " : "Importazione completata. ")
-                        + "Dati in memoria; nessuna regola di rilevamento applicata.");
+                        + toCheck + " osservazioni da approfondire. Nessun verdetto malware; dati in memoria.");
             });
         });
         TableView<NetworkFlow> table = new TableView<>(flows);
@@ -162,6 +170,7 @@ public final class RadarLumeApplication extends Application {
         table.getColumns().add(column("Porta sorg.", NetworkFlow::sourcePort, 85));
         table.getColumns().add(column("Porta dest.", NetworkFlow::destinationPort, 85));
         table.getColumns().add(column("Nome TLS (SNI)", NetworkFlow::serverName, 190));
+        table.getColumns().add(column("HTTP in chiaro (Host)", NetworkFlow::httpHost, 170));
         table.getColumns().add(column("App (metadati cattura)", f -> f.app() == null ? "" : f.app().toString(), 210));
         table.getColumns().add(column("Pacchetti", f -> Long.toString(f.packets()), 80));
         table.getColumns().add(column("Byte IP", f -> Long.toString(f.bytes()), 80));
@@ -175,10 +184,9 @@ public final class RadarLumeApplication extends Application {
         dns.getColumns().add(column("Indirizzi nelle risposte", d -> String.join(", ", d.addresses()), 340));
         dns.getColumns().add(column("Primo (UTC)", d -> TIME.format(d.firstSeen()), 150));
         dns.setPlaceholder(new Label("Nessun nome DNS in chiaro da mostrare. Dopo un'importazione, con DNS cifrato è normale: non significa assenza di traffico."));
-        SplitPane tables = new SplitPane(new VBox(6, new Label("Flussi"), table), new VBox(6, new Label("Nomi DNS in chiaro"), dns));
-        tables.setOrientation(javafx.geometry.Orientation.VERTICAL); tables.setDividerPositions(0.62);
-        VBox.setVgrow(table, Priority.ALWAYS); VBox.setVgrow(dns, Priority.ALWAYS);
-        VBox pane = pane(note, open, networkLabel, tables); VBox.setVgrow(tables, Priority.ALWAYS); return pane;
+        networkFindings.setEditable(false); networkFindings.setWrapText(true);
+        results.getTabs().setAll(tab("Osservazioni", networkFindings), tab("Flussi", table), tab("Nomi DNS in chiaro", dns));
+        VBox pane = pane(note, open, networkLabel, results); VBox.setVgrow(results, Priority.ALWAYS); return pane;
     }
     /** Provenance and limits of the imported capture, shown above the tables so results are never read without them. */
     private static String describe(CaptureAnalysis result) {
@@ -188,6 +196,16 @@ public final class RadarLumeApplication extends Application {
         if (result.firstPacket() != null)
             text.append("\nIntervallo (UTC, orologio del dispositivo di cattura): ").append(TIME.format(result.firstPacket())).append(" → ").append(TIME.format(result.lastPacket()));
         result.warnings().forEach(warning -> text.append("\n• ").append(warning));
+        return text.toString();
+    }
+    /** Same layout as the Android checks: rule, version, severity, confidence, what it refers to, why, what to do next. */
+    private static String describe(List<Finding> findings) {
+        StringBuilder text = new StringBuilder("Le osservazioni indicano dove guardare meglio: non sono verdetti. Regole applicate: "
+                + "NET-001 HTTP in chiaro · NET-002 invio molto superiore alla ricezione · NET-003 molte destinazioni per app.\n\n");
+        if (findings.isEmpty()) text.append("Nessuna delle tre regole è scattata. Non equivale a \"nessun rischio\": il contenuto cifrato non è stato esaminato.\n");
+        findings.forEach(f -> text.append(f.ruleId()).append(" v").append(f.ruleVersion()).append(" · ").append(f.severity())
+                .append(" · confidenza ").append(f.confidence()).append("\nRiferimento: ").append(f.evidenceKey())
+                .append("\n").append(f.explanation()).append("\nVerifica: ").append(f.nextStep()).append("\n\n"));
         return text.toString();
     }
     private VBox settingsPane(Path db) {
