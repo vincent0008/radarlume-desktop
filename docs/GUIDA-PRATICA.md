@@ -33,6 +33,18 @@ IP identifica un indirizzo, porta un servizio, DNS traduce nomi in indirizzi. TC
 
 Per attribuire traffico al telefono serve un punto di osservazione appropriato, per esempio un gateway di laboratorio attraversato dal suo traffico. Annotare assegnazioni IP, orari e configurazione: NAT e indirizzi condivisi possono confondere l'attribuzione. Per attribuirlo a una specifica app servono ulteriori evidenze; il nostro importatore PCAP non lo fa.
 
+### Cattura con PCAPdroid e importazione in RadarLume
+
+PCAPdroid è un'app di terzi che crea una VPN locale sul telefono: il traffico delle app passa da lì e viene scritto in un file, senza root. Vede indirizzi, porte, orari e dimensioni; non rende leggibile HTTPS.
+
+1. In PCAPdroid scegli la modalità di salvataggio **PCAP file** e, nelle impostazioni, attiva **PCAPdroid extensions**: ogni pacchetto porta con sé UID e nome dell'app che lo ha generato. Lascia il formato PCAP: il PCAPNG di PCAPdroid non è ancora letto da RadarLume per la parte app.
+2. Annota versione di PCAPdroid, versione Android, eventuale filtro per app e se IPv6 è attivo (è disattivato per impostazione predefinita: in tal caso il traffico IPv6 non viene né instradato né catturato).
+3. Avvia la cattura, usa per uno o due minuti un'app nota, ferma la cattura. Android consente una sola VPN alla volta: con un'altra VPN attiva la cattura non parte o la sostituisce.
+4. Porta il file sul PC e importalo dalla scheda **Rete / PCAP**. Confronta l'impronta SHA-256 mostrata con quella del file originale se vuoi dimostrare che è lo stesso.
+5. Leggi prima il riquadro con intervallo, avvisi e limiti, poi le tabelle. Verifica che flussi, nomi DNS e app corrispondano a ciò che hai fatto davvero.
+
+Cosa non concludere: una destinazione sconosciuta, molto traffico o un nome insolito non provano un'infezione. Con DNS privato (DoT) attivo su Android la tabella DNS può restare vuota. Gli indirizzi sorgente sono quelli interni della VPN di PCAPdroid, non quelli reali della rete.
+
 ## 5. Primo esercizio ripetibile
 
 1. Usa un telefono di laboratorio tuo, annotando modello, versione e autorizzazioni concesse. Evita dati personali reali.

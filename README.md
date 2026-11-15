@@ -19,7 +19,8 @@ In **Android**, seleziona il dispositivo, conferma l'autorizzazione e premi **Co
 - Selezione esplicita e consenso prima dell'inventario; nuova verifica dello stato al momento della lettura.
 - Nomi dei pacchetti e classificazione sistema/utente, con filtro nella UI.
 - Salvataggio volontario SQLite, caricamento dell'ultimo inventario e cancellazione dello storico con conferma.
-- Importazione PCAP/PCAPNG: flussi TCP/UDP IPv4/IPv6 aggregati per direzione, conteggio pacchetti e byte dei frame.
+- Importazione PCAP/PCAPNG (anche esportati da PCAPdroid): flussi TCP/UDP IPv4/IPv6 aggregati per direzione, pacchetti, byte IP, primo/ultimo orario, nome TLS (SNI) in chiaro, nomi DNS in chiaro con indirizzi restituiti, impronta SHA-256 del file.
+- App associata al flusso solo se dichiarata dalla cattura stessa (estensioni PCAPdroid in formato PCAP); mai dedotta da IP o orari.
 - Operazioni fuori dal thread JavaFX, annullamento, timeout e limiti di output.
 
 ## Prerequisiti
@@ -77,13 +78,17 @@ Nessun root, installazione, disinstallazione, modifica delle impostazioni Androi
 
 ## Analisi rete: limiti
 
-TShark usa `-n -r`, senza risoluzione di nomi né cattura live. Sono considerati solo pacchetti TCP/UDP con indirizzi IP decodificabili. La chiave di aggregazione comprende sorgente, destinazione, protocollo e porte; le direzioni restano separate e l'intervallo è l'intera cattura. I byte rappresentano le lunghezze dei frame, non il payload. Per pacchetti incapsulati si usa la prima occorrenza dei campi: l'MVP non ricostruisce i tunnel.
+TShark usa `-n -r`, senza risoluzione di nomi né cattura live. Sono considerati solo pacchetti TCP/UDP con indirizzi IP decodificabili; i messaggi ICMP sono esclusi perché citano intestazioni altrui. La chiave di aggregazione comprende sorgente, destinazione, protocollo e porte; le direzioni restano separate e l'intervallo è l'intera cattura. I byte sono la lunghezza del pacchetto IP (lunghezza del frame solo se quella IP manca), così il trailer PCAPdroid non gonfia i totali. Per pacchetti incapsulati si usa la prima occorrenza dei campi: l'MVP non ricostruisce i tunnel.
 
-- Limite file: 100 MiB; limite stdout/stderr: 16 MiB per stream; 50.000 flussi; timeout 90 secondi.
-- I limiti causano un errore, non risultati troncati presentati come completi.
-- Nessuna decifratura TLS, estrazione dei contenuti o attribuzione di connessioni alle app.
+Nomi DNS e SNI sono letti solo se in chiaro: DNS cifrato (DoH/DoT), ECH e QUIC non decodificato li nascondono, quindi una tabella vuota non indica assenza di traffico. Gli orari sono quelli scritti dal dispositivo di cattura. I nomi provenienti dalla cattura sono trattati come dati non fidati e sostituiti da un segnaposto se non hanno forma di nome host.
+
+Metadati app: sono letti dal trailer che PCAPdroid aggiunge con l'opzione *PCAPdroid extensions* nel formato PCAP (UID e nome pacchetto troncato a 19 caratteri). Il formato PCAPNG di PCAPdroid usa blocchi personalizzati che RadarLume non legge ancora: in quel caso nessuna attribuzione.
+
+- Limite file: 100 MiB; limite output TShark: 64 MiB (una riga per pacchetto, circa mezzo milione di pacchetti); 50.000 flussi; 20.000 nomi DNS; timeout 90 secondi.
+- I limiti causano un errore, non risultati troncati presentati come completi. Unica eccezione: un file che termina a metà pacchetto viene importato per la parte leggibile ed è marcato come **parziale**; il superamento del limite dei nomi DNS è segnalato come avviso.
+- Nessuna decifratura TLS o estrazione dei contenuti. Nessuna attribuzione alle app oltre ai metadati dichiarati dalla cattura.
 - Un telefono collegato via USB non espone automaticamente il proprio traffico.
-- DNS, IOC, scoring, baseline, cattura live ed esportazione dei report sono ancora da implementare.
+- IOC, scoring, baseline, cattura live, salvataggio delle analisi di rete ed esportazione dei report sono ancora da implementare.
 
 ## Architettura
 
