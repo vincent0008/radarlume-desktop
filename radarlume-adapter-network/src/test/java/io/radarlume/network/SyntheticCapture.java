@@ -13,18 +13,20 @@ import java.util.List;
 /**
  * Builds small capture files in code, so that no real (personal) traffic is ever committed.
  * Addresses are documentation ranges and the name is under the reserved {@code .test} domain.
- * The scenario: one DNS query and its answer, then a TCP SYN and a TLS ClientHello towards the resolved address.
+ * The scenario: one DNS query and its answer, one unencrypted HTTP request, then a TCP SYN and a TLS
+ * ClientHello towards the resolved address.
  */
 final class SyntheticCapture {
     static final String NAME = "example.test";
     static final String PHONE = "10.215.173.1", RESOLVER = "10.215.173.2", SERVER = "192.0.2.10";
+    static final String PLAIN_NAME = "plain.test", PLAIN_SERVER = "192.0.2.20";
     static final int UID = 10123;
     static final String APP = "com.example.browser";
     /** 2026-01-01T00:00:00Z; packets are one second apart, each at .25 s. */
     static final int START_EPOCH = 1_767_225_600;
 
     private static final int LINKTYPE_ETHERNET = 1, LINKTYPE_RAW_IP = 101;
-    private static final int[] PHONE_IP = {10, 215, 173, 1}, RESOLVER_IP = {10, 215, 173, 2}, SERVER_IP = {192, 0, 2, 10};
+    private static final int[] PHONE_IP = {10, 215, 173, 1}, RESOLVER_IP = {10, 215, 173, 2}, SERVER_IP = {192, 0, 2, 10}, PLAIN_IP = {192, 0, 2, 20};
 
     private SyntheticCapture() {}
 
@@ -46,6 +48,7 @@ final class SyntheticCapture {
         return List.of(
                 ip4(17, PHONE_IP, RESOLVER_IP, udp(40000, 53, dnsQuery(NAME))),
                 ip4(17, RESOLVER_IP, PHONE_IP, udp(53, 40000, dnsAnswer(NAME, SERVER_IP))),
+                ip4(6, PHONE_IP, PLAIN_IP, tcp(50001, 80, 101, 0x18, ("GET /track?id=1 HTTP/1.1\r\nHost: " + PLAIN_NAME + "\r\n\r\n").getBytes(StandardCharsets.US_ASCII))),
                 ip4(6, PHONE_IP, SERVER_IP, tcp(50000, 443, 100, 0x02, new byte[0])),
                 ip4(6, PHONE_IP, SERVER_IP, tcp(50000, 443, 101, 0x18, clientHello(NAME))));
     }

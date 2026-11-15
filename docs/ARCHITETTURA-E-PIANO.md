@@ -33,7 +33,7 @@ Le porte isolano il dominio da ADB, TShark e JDBC. Sono ora presenti anche Setti
 |11|Severity e confidence|Implementati, senza punteggio probabilistico|
 |12|Test e dati simulati|Parziale: test sintetici; manca dataset rappresentativo|
 |13|Import PCAP/PCAPNG|Implementato; verificato con TShark reale su catture sintetiche nei formati PCAPdroid (IP grezzo, estensioni, file troncato). Cattura reale da telefono ancora da validare|
-|14|Flussi e DNS|Flussi direzionali con orari, SNI e app da metadati PCAPdroid; nomi DNS in chiaro. Risultati solo in memoria|
+|14|Flussi e DNS|Flussi direzionali con orari, SNI e app da metadati PCAPdroid; nomi DNS in chiaro; host delle richieste HTTP non cifrate. Prime regole di rete NET-001/002/003 in `NetworkAssessmentService`, con soglie euristiche da tarare. Risultati solo in memoria|
 |15|IOC con feed di test|Da fare|
 |16|Cattura live autorizzata|Da fare|
 |17|Associazione dispositivo/rete|Da fare|

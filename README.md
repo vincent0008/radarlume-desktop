@@ -21,6 +21,12 @@ In **Android**, seleziona il dispositivo, conferma l'autorizzazione e premi **Co
 - Salvataggio volontario SQLite, caricamento dell'ultimo inventario e cancellazione dello storico con conferma.
 - Importazione PCAP/PCAPNG (anche esportati da PCAPdroid): flussi TCP/UDP IPv4/IPv6 aggregati per direzione, pacchetti, byte IP, primo/ultimo orario, nome TLS (SNI) in chiaro, nomi DNS in chiaro con indirizzi restituiti, impronta SHA-256 del file.
 - App associata al flusso solo se dichiarata dalla cattura stessa (estensioni PCAPdroid in formato PCAP); mai dedotta da IP o orari.
+- Prime regole di rete, mostrate nella scheda **Osservazioni** dopo ogni importazione. Indicano dove guardare meglio, non sono verdetti:
+  - `NET-001`: richiesta HTTP non cifrata effettivamente decodificata (non la sola porta 80). Confidenza alta: è un fatto osservato.
+  - `NET-002`: verso uno stesso indirizzo, almeno 512 KiB inviati e almeno il doppio del ricevuto. Confidenza bassa: backup, foto e chiamate producono lo stesso schema, e la direzione è stimata da porte e ordine dei pacchetti.
+  - `NET-003`: un'app contatta almeno 20 indirizzi remoti distinti. Informativa; richiede i metadati app.
+  - `DATA-003`…`DATA-006`: cattura troncata, metadati app assenti, nessun pacchetto analizzabile, elenco limitato. Servono a non far passare un'analisi incompleta per un risultato pulito.
+  - Le soglie sono euristiche del progetto, da tarare con catture reali. Nessuna regola esamina il contenuto cifrato.
 - Operazioni fuori dal thread JavaFX, annullamento, timeout e limiti di output.
 
 ## Prerequisiti

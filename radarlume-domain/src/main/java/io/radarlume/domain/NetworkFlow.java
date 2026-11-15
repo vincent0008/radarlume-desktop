@@ -10,13 +10,16 @@ import java.util.Objects;
  * @param app        app declared by the capture tool's own metadata, or {@code null} when the capture carries none.
  *                   Never inferred from addresses or timing.
  * @param serverName TLS server name (SNI) observed in clear text inside this flow, or empty
+ * @param httpHost   Host header of an unencrypted HTTP request decoded in this flow, or empty.
+ *                   Non-empty means the content of that request was readable on the network path.
  */
 public record NetworkFlow(String source, String destination, String protocol,
                           String sourcePort, String destinationPort, long packets, long bytes,
-                          Instant firstSeen, Instant lastSeen, CaptureApp app, String serverName) {
+                          Instant firstSeen, Instant lastSeen, CaptureApp app, String serverName, String httpHost) {
     public NetworkFlow {
         Objects.requireNonNull(firstSeen);
         Objects.requireNonNull(lastSeen);
         Objects.requireNonNull(serverName);
+        Objects.requireNonNull(httpHost);
     }
 }

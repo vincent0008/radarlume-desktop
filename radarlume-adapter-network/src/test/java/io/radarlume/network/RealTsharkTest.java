@@ -38,16 +38,19 @@ class RealTsharkTest {
 
     @Test void importsRawIpCaptureWithDnsTlsNameAndTimes() throws Exception {
         var analysis = analyzer().analyze(SyntheticCapture.rawIp(temp.resolve("raw.pcap")));
-        assertEquals(4, analysis.packets()); assertFalse(analysis.truncated());
+        assertEquals(5, analysis.packets()); assertFalse(analysis.truncated());
         assertEquals(Instant.ofEpochSecond(SyntheticCapture.START_EPOCH, 250_000_000), analysis.firstPacket());
-        assertEquals(Instant.ofEpochSecond(SyntheticCapture.START_EPOCH + 3, 250_000_000), analysis.lastPacket());
+        assertEquals(Instant.ofEpochSecond(SyntheticCapture.START_EPOCH + 4, 250_000_000), analysis.lastPacket());
         assertEquals(CaptureAnalysis.AppMetadata.NONE, analysis.appMetadata());
         assertEquals(64, analysis.sha256().length());
 
-        assertEquals(3, analysis.flows().size());
+        assertEquals(4, analysis.flows().size());
+        var http = analysis.flows().get(2);
+        assertEquals(SyntheticCapture.PLAIN_SERVER, http.destination()); assertEquals("80", http.destinationPort());
+        assertEquals(SyntheticCapture.PLAIN_NAME, http.httpHost()); assertEquals("", http.serverName());
         var tls = analysis.flows().getLast();
         assertEquals(SyntheticCapture.SERVER, tls.destination()); assertEquals("443", tls.destinationPort());
-        assertEquals(2, tls.packets()); assertEquals(SyntheticCapture.NAME, tls.serverName()); assertNull(tls.app());
+        assertEquals(2, tls.packets()); assertEquals(SyntheticCapture.NAME, tls.serverName()); assertEquals("", tls.httpHost()); assertNull(tls.app());
 
         assertEquals(1, analysis.dnsNames().size());
         var dns = analysis.dnsNames().getFirst();
@@ -67,7 +70,7 @@ class RealTsharkTest {
     }
     @Test void truncatedFileGivesPartialResultMarkedAsSuch() throws Exception {
         var analysis = analyzer().analyze(SyntheticCapture.truncated(temp.resolve("cut.pcap")));
-        assertTrue(analysis.truncated()); assertEquals(3, analysis.packets());
+        assertTrue(analysis.truncated()); assertEquals(4, analysis.packets());
     }
     @Test void fileThatIsNotACaptureIsRejectedWithTsharkReason() throws Exception {
         Path file = Files.writeString(temp.resolve("notes.pcap"), "this is not a capture");

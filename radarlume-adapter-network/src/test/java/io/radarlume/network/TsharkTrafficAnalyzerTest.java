@@ -16,7 +16,7 @@ class TsharkTrafficAnalyzerTest {
     /** One TShark output line. Columns: time, addresses, ports, lengths, DNS, SNI, Ethernet trailer. */
     private static String line(String time, String src, String dst, String protocol, int sport, int dport, int bytes, String... extra) {
         boolean v6 = src.contains(":"), tcp = protocol.equals("TCP");
-        String[] f = new String[18];
+        String[] f = new String[19];
         Arrays.fill(f, "");
         f[0] = time; f[v6 ? 2 : 1] = src; f[v6 ? 4 : 3] = dst;
         f[tcp ? 5 : 7] = Integer.toString(sport); f[tcp ? 6 : 8] = Integer.toString(dport);
