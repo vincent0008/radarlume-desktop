@@ -15,6 +15,20 @@ public final class BoundedProcessRunner implements CommandRunner {
         this.maxBytes = maxBytes;
     }
     @Override public String run(List<String> arguments, Duration timeout) {
+        CommandResult result = execute(arguments, timeout);
+        if (result.exitCode() != 0)
+            throw new ScanException("Lo strumento ha restituito errore (codice " + result.exitCode() + ")" + detail(result.stderr())
+                    + ". Verifica autorizzazione ADB o validità della cattura. Nessun risultato parziale utilizzato.");
+        return result.stdout();
+    }
+    /** First line of stderr, bounded and without control characters, so the user can see why the tool failed. */
+    public static String detail(String stderr) {
+        String line = stderr.lines().map(String::strip).filter(s -> !s.isEmpty()).findFirst().orElse("");
+        line = line.replaceAll("\\p{Cntrl}", " ");
+        if (line.length() > 300) line = line.substring(0, 300) + "…";
+        return line.isEmpty() ? "" : ": " + line;
+    }
+    @Override public CommandResult execute(List<String> arguments, Duration timeout) {
         if (arguments.isEmpty() || timeout.isNegative() || timeout.isZero()) throw new IllegalArgumentException();
         Process process;
         try { process = new ProcessBuilder(List.copyOf(arguments)).start(); }
@@ -28,11 +42,8 @@ public final class BoundedProcessRunner implements CommandRunner {
             if (!process.waitFor(remaining(deadline), TimeUnit.NANOSECONDS))
                 throw new TimeoutException();
             byte[] stdout = out.get(remaining(deadline), TimeUnit.NANOSECONDS);
-            err.get(remaining(deadline), TimeUnit.NANOSECONDS);
-            if (process.exitValue() != 0)
-                throw new ScanException("Lo strumento ha restituito errore (codice " + process.exitValue()
-                        + "). Verifica autorizzazione ADB o validità della cattura. Nessun risultato parziale utilizzato.");
-            return new String(stdout, StandardCharsets.UTF_8);
+            byte[] stderr = err.get(remaining(deadline), TimeUnit.NANOSECONDS);
+            return new CommandResult(process.exitValue(), new String(stdout, StandardCharsets.UTF_8), new String(stderr, StandardCharsets.UTF_8));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new ScanException("Operazione annullata.", e);

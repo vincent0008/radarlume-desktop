@@ -7,7 +7,7 @@ import java.sql.*;
 import java.time.Instant;
 import java.util.*;
 
-/** Opens one connection per operation. Schema v1 and inventory writes are transactional. */
+/** Opens one connection per operation. Schema migrations and inventory writes are transactional. */
 public final class SqliteInventoryRepository implements InventoryRepository, SettingsRepository {
     private final Path file;
     public SqliteInventoryRepository(Path file) { this.file = file.toAbsolutePath(); }

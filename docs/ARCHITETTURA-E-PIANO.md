@@ -32,8 +32,8 @@ Le porte isolano il dominio da ADB, TShark e JDBC. Sono ora presenti anche Setti
 |10|Evidence e Finding|Implementati; persistenza da fare|
 |11|Severity e confidence|Implementati, senza punteggio probabilistico|
 |12|Test e dati simulati|Parziale: test sintetici; manca dataset rappresentativo|
-|13|Import PCAP/PCAPNG|Implementato; validazione con catture reali da ampliare|
-|14|Flussi e DNS|Parziale: flussi direzionali, DNS da fare|
+|13|Import PCAP/PCAPNG|Implementato; verificato con TShark reale su catture sintetiche nei formati PCAPdroid (IP grezzo, estensioni, file troncato). Cattura reale da telefono ancora da validare|
+|14|Flussi e DNS|Flussi direzionali con orari, SNI e app da metadati PCAPdroid; nomi DNS in chiaro. Risultati solo in memoria|
 |15|IOC con feed di test|Da fare|
 |16|Cattura live autorizzata|Da fare|
 |17|Associazione dispositivo/rete|Da fare|

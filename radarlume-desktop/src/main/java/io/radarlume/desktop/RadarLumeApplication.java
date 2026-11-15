@@ -33,7 +33,11 @@ public final class RadarLumeApplication extends Application {
     private final ComboBox<Device> devices = new ComboBox<>();
     private final CheckBox consent = new CheckBox("Sono autorizzato ad analizzare il dispositivo selezionato");
     private final ObservableList<InstalledApp> apps = FXCollections.observableArrayList();
+    /** One output line per packet: 64 MiB is roughly half a million packets. Larger captures are refused, not cut. */
+    private static final int TSHARK_OUTPUT_LIMIT = 64 * 1024 * 1024;
+    private static final java.time.format.DateTimeFormatter TIME = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(java.time.ZoneOffset.UTC);
     private final ObservableList<NetworkFlow> flows = FXCollections.observableArrayList();
+    private final ObservableList<DnsName> dnsNames = FXCollections.observableArrayList();
     private final BooleanProperty savable = new SimpleBooleanProperty();
     private final Label inventoryLabel = new Label("Nessun inventario acquisito");
     private final Label networkLabel = new Label("Nessuna cattura importata");
@@ -132,25 +136,59 @@ public final class RadarLumeApplication extends Application {
         VBox.setVgrow(table, Priority.ALWAYS); return pane;
     }
     private VBox networkPane(Stage stage) {
-        Label note = new Label("Importa soltanto catture che sei autorizzato ad analizzare. Il collegamento USB non rende automaticamente visibile il traffico del telefono. Sono aggregati i pacchetti TCP/UDP IPv4/IPv6 per direzione, senza attribuzione alle app."); note.setWrapText(true);
+        Label note = new Label("Importa soltanto catture che sei autorizzato ad analizzare, per esempio esportate da PCAPdroid. "
+                + "Il collegamento USB non rende automaticamente visibile il traffico del telefono. "
+                + "Sono aggregati i pacchetti TCP/UDP IPv4/IPv6 per direzione. L'app è mostrata solo se dichiarata dai metadati della cattura; "
+                + "i contenuti cifrati non vengono letti.");
+        note.setWrapText(true);
+        networkLabel.setWrapText(true);
         Button open = button("Importa PCAP / PCAPNG", () -> {
             FileChooser chooser = new FileChooser(); chooser.setTitle("Seleziona cattura autorizzata");
             chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Catture di rete", "*.pcap", "*.pcapng", "*.cap"));
             var file = chooser.showOpenDialog(stage); if (file == null) return;
-            var analyzer = new TsharkTrafficAnalyzer(tool(tsharkPath), new BoundedProcessRunner(16 * 1024 * 1024));
-            flows.clear(); networkLabel.setText("Nessuna analisi completata");
-            run("Analisi cattura…", () -> analyzer.analyze(file.toPath()), list -> {
-                flows.setAll(list); networkLabel.setText(file.getName() + " · " + list.size() + " flussi direzionali");
-                status.setText(list.isEmpty() ? "Nessun pacchetto TCP/UDP IP decodificabile. Non è un giudizio di sicurezza." : "Importazione completata. Metadati in memoria; nessuna regola di rilevamento applicata.");
+            var analyzer = new TsharkTrafficAnalyzer(tool(tsharkPath), new BoundedProcessRunner(TSHARK_OUTPUT_LIMIT));
+            flows.clear(); dnsNames.clear(); networkLabel.setText("Nessuna analisi completata");
+            run("Analisi cattura…", () -> analyzer.analyze(file.toPath()), result -> {
+                flows.setAll(result.flows()); dnsNames.setAll(result.dnsNames()); networkLabel.setText(describe(result));
+                status.setText(result.packets() == 0 ? "Nessun pacchetto TCP/UDP IP decodificabile. Non è un giudizio di sicurezza."
+                        : (result.truncated() ? "Importazione PARZIALE (file troncato). " : "Importazione completata. ")
+                        + "Dati in memoria; nessuna regola di rilevamento applicata.");
             });
         });
         TableView<NetworkFlow> table = new TableView<>(flows);
-        table.getColumns().add(column("Sorgente", NetworkFlow::source, 220)); table.getColumns().add(column("Destinazione", NetworkFlow::destination, 220));
-        table.getColumns().add(column("Protocollo", NetworkFlow::protocol, 90)); table.getColumns().add(column("Porta sorg.", NetworkFlow::sourcePort, 100));
-        table.getColumns().add(column("Porta dest.", NetworkFlow::destinationPort, 100));
-        table.getColumns().add(column("Pacchetti", f -> Long.toString(f.packets()), 90)); table.getColumns().add(column("Byte frame", f -> Long.toString(f.bytes()), 100));
+        table.getColumns().add(column("Sorgente", NetworkFlow::source, 150));
+        table.getColumns().add(column("Destinazione", NetworkFlow::destination, 150));
+        table.getColumns().add(column("Protocollo", NetworkFlow::protocol, 80));
+        table.getColumns().add(column("Porta sorg.", NetworkFlow::sourcePort, 85));
+        table.getColumns().add(column("Porta dest.", NetworkFlow::destinationPort, 85));
+        table.getColumns().add(column("Nome TLS (SNI)", NetworkFlow::serverName, 190));
+        table.getColumns().add(column("App (metadati cattura)", f -> f.app() == null ? "" : f.app().toString(), 210));
+        table.getColumns().add(column("Pacchetti", f -> Long.toString(f.packets()), 80));
+        table.getColumns().add(column("Byte IP", f -> Long.toString(f.bytes()), 80));
+        table.getColumns().add(column("Primo (UTC)", f -> TIME.format(f.firstSeen()), 150));
+        table.getColumns().add(column("Ultimo (UTC)", f -> TIME.format(f.lastSeen()), 150));
         table.setPlaceholder(new Label("Nessuna cattura importata"));
-        VBox pane = pane(note, open, networkLabel, table); VBox.setVgrow(table, Priority.ALWAYS); return pane;
+        TableView<DnsName> dns = new TableView<>(dnsNames);
+        dns.getColumns().add(column("Nome DNS richiesto", DnsName::name, 320));
+        dns.getColumns().add(column("Richieste", d -> Long.toString(d.queries()), 80));
+        dns.getColumns().add(column("Risposte", d -> Long.toString(d.responses()), 80));
+        dns.getColumns().add(column("Indirizzi nelle risposte", d -> String.join(", ", d.addresses()), 340));
+        dns.getColumns().add(column("Primo (UTC)", d -> TIME.format(d.firstSeen()), 150));
+        dns.setPlaceholder(new Label("Nessun nome DNS in chiaro da mostrare. Dopo un'importazione, con DNS cifrato è normale: non significa assenza di traffico."));
+        SplitPane tables = new SplitPane(new VBox(6, new Label("Flussi"), table), new VBox(6, new Label("Nomi DNS in chiaro"), dns));
+        tables.setOrientation(javafx.geometry.Orientation.VERTICAL); tables.setDividerPositions(0.62);
+        VBox.setVgrow(table, Priority.ALWAYS); VBox.setVgrow(dns, Priority.ALWAYS);
+        VBox pane = pane(note, open, networkLabel, tables); VBox.setVgrow(tables, Priority.ALWAYS); return pane;
+    }
+    /** Provenance and limits of the imported capture, shown above the tables so results are never read without them. */
+    private static String describe(CaptureAnalysis result) {
+        StringBuilder text = new StringBuilder(result.fileName()).append(" · ").append(result.fileBytes()).append(" byte · SHA-256 ").append(result.sha256());
+        text.append("\nPacchetti TCP/UDP: ").append(result.packets()).append(" · flussi direzionali: ").append(result.flows().size())
+            .append(" · nomi DNS: ").append(result.dnsNames().size());
+        if (result.firstPacket() != null)
+            text.append("\nIntervallo (UTC, orologio del dispositivo di cattura): ").append(TIME.format(result.firstPacket())).append(" → ").append(TIME.format(result.lastPacket()));
+        result.warnings().forEach(warning -> text.append("\n• ").append(warning));
+        return text.toString();
     }
     private VBox settingsPane(Path db) {
         adbPath.disableProperty().bind(busy); tsharkPath.disableProperty().bind(busy);
