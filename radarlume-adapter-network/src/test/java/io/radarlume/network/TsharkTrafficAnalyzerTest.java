@@ -4,6 +4,7 @@ import io.radarlume.domain.*;
 import io.radarlume.process.CommandRunner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.Duration;
 import java.time.Instant;
@@ -13,16 +14,29 @@ import static org.junit.jupiter.api.Assertions.*;
 class TsharkTrafficAnalyzerTest {
     @TempDir Path temp;
 
-    /** One TShark output line. Columns: time, addresses, ports, lengths, DNS, SNI, Ethernet trailer. */
+    /** One line of the first pass (flows, DNS, SNI, app). Columns 0..19; extra sets columns by index. */
     private static String line(String time, String src, String dst, String protocol, int sport, int dport, int bytes, String... extra) {
         boolean v6 = src.contains(":"), tcp = protocol.equals("TCP");
-        String[] f = new String[25];
+        String[] f = new String[20];
         Arrays.fill(f, "");
         f[0] = time; f[v6 ? 2 : 1] = src; f[v6 ? 4 : 3] = dst;
         f[tcp ? 5 : 7] = Integer.toString(sport); f[tcp ? 6 : 8] = Integer.toString(dport);
         f[9] = Integer.toString(bytes); f[v6 ? 11 : 10] = Integer.toString(v6 ? bytes - 40 : bytes);
         for (int i = 0; i < extra.length; i += 2) f[Integer.parseInt(extra[i])] = extra[i + 1];
         return String.join("\t", f) + "\n";
+    }
+    /** One line of the HTTP pass. Columns 0..24 (see HTTP_FIELDS); extra sets columns by index. */
+    private static String httpLine(String time, String src, String dst, int sport, int dport, int stream, String... extra) {
+        String[] f = new String[24];
+        Arrays.fill(f, "");
+        f[0] = time; f[1] = src; f[3] = dst; f[5] = Integer.toString(sport); f[6] = Integer.toString(dport); f[8] = Integer.toString(stream);
+        for (int i = 0; i < extra.length; i += 2) f[Integer.parseInt(extra[i])] = extra[i + 1];
+        return String.join("\t", f) + "\n";
+    }
+    private static String hex(String text) {
+        StringBuilder b = new StringBuilder();
+        for (byte x : text.getBytes(StandardCharsets.UTF_8)) b.append(String.format("%02x:", x));
+        return b.length() == 0 ? "" : b.substring(0, b.length() - 1);
     }
     private static CaptureAnalysis parse(String output) { return TsharkTrafficAnalyzer.parse(output, "test.pcap", 1, "hash", false); }
 
@@ -86,33 +100,72 @@ class TsharkTrafficAnalyzerTest {
         assertEquals(CaptureAnalysis.AppMetadata.NONE, without.appMetadata());
         assertNull(without.flows().getFirst().app());
     }
-    @Test void readsRequestsAndKeepsDecryptedOnesApartFromClearText() {
-        String tcp = "eth:ethertype:ip:tcp", trailer = "010720210000278b636f6d2e6578616d706c652e62726f7773657200";
-        var analysis = TsharkTrafficAnalyzer.parse(
-                line("1", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 300, "19", tcp + ":tls", "16", "shop.test", "17", trailer)
-                + line("2", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 300, "19", tcp + ":tls:http2", "17", trailer,
-                        "22", "GET POST", "23", "shop.test api.shop.test:8443", "24", "/a,b?x=1 /track?lat=45.1")
-                + line("3", "192.0.2.10", "10.0.0.1", "TCP", 443, 50000, 300, "19", tcp + ":tls:http2:json")
-                + line("4", "10.0.0.1", "192.0.2.11", "TCP", 50001, 443, 300, "19", tcp + ":tls:http", "18", "old.test", "20", "GET", "21", "/h1")
-                + line("5", "10.0.0.1", "192.0.2.12", "TCP", 50002, 443, 300, "19", tcp + ":tls:x509sat:x509ce")
-                + line("6", "10.0.0.1", "192.0.2.13", "TCP", 50003, 80, 300, "19", tcp + ":http", "18", "plain.test", "20", "GET", "21", "/clear\u0001" + "x".repeat(3000)),
-                "test.pcap", 1, "hash", false, true);
-        assertEquals(new CaptureAnalysis.Tls(true, 3, 2), analysis.tls(), "Certificates seen in a TLS 1.2 handshake are not decrypted content");
-        var requests = analysis.requests();
-        assertEquals(4, requests.size());
-        assertEquals(List.of("GET", "POST", "GET", "GET"), requests.stream().map(HttpRequest::method).toList());
-        assertEquals("/a,b?x=1", requests.get(0).path(), "A comma inside a path does not split it");
-        assertEquals("api.shop.test", requests.get(1).host()); assertEquals("/track?lat=45.1", requests.get(1).path());
-        assertTrue(requests.get(1).decrypted()); assertEquals(10123, requests.get(1).app().uid());
-        assertEquals("old.test", requests.get(2).host()); assertTrue(requests.get(2).decrypted());
-        assertFalse(requests.get(3).decrypted());
-        assertTrue(requests.get(3).path().startsWith("/clear?x") && requests.get(3).path().length() == TsharkTrafficAnalyzer.MAX_PATH_CHARS + 1);
-        assertEquals("", analysis.flows().get(2).httpHost(), "A Host header read with the keys is not clear-text HTTP");
+    @Test void countsTlsConnectionsAndTheOnesThatBecameReadable() {
+        String tcp = "eth:ethertype:ip:tcp";
+        var analysis = parse(line("1", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 300, "19", tcp + ":tls:http2")
+                + line("2", "192.0.2.10", "10.0.0.1", "TCP", 443, 50000, 300, "19", tcp + ":tls:http2:json")
+                + line("3", "10.0.0.1", "192.0.2.11", "TCP", 50001, 443, 300, "19", tcp + ":tls:x509sat")
+                + line("4", "10.0.0.1", "192.0.2.13", "TCP", 50003, 80, 300, "19", tcp + ":http", "18", "plain.test"));
+        assertEquals(new CaptureAnalysis.Tls(true, 2, 1), TsharkTrafficAnalyzer.parse(
+                line("1", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 300, "19", tcp + ":tls:http2")
+                + line("3", "10.0.0.1", "192.0.2.11", "TCP", 50001, 443, 300, "19", tcp + ":tls:x509sat"),
+                "t", 1, "h", false, true).tls(), "Certificates in a TLS 1.2 handshake are not decrypted content");
         assertEquals("plain.test", analysis.flows().getLast().httpHost());
-
-        var useless = TsharkTrafficAnalyzer.parse(line("1", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 300, "19", tcp + ":tls"), "test.pcap", 1, "hash", false, true);
-        assertTrue(useless.warnings().stream().anyMatch(w -> w.contains("altra cattura")));
-        assertFalse(parse(line("1", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 300, "19", tcp + ":tls")).tls().keylogUsed());
+    }
+    @Test void parseRequestsJoinsHeadersAndBodyByStreamAndKeepsOnlyRequestDirection() {
+        String tr = "010720210000278b636f6d2e6578616d706c652e62726f7773657200";
+        var result = TsharkTrafficAnalyzer.parseRequests(
+                // HTTP/2 POST on stream 5, id 1: headers in one packet, body (client->server) in the next.
+                httpLine("1", "10.0.0.1", "192.0.2.10", 50000, 443, 5, "7", tr, "9", "1", "10", "POST", "11", "shop.test",
+                        "12", "/cart?lat=45.1", "13", "cookie referer content-type", "14", "https://ref.test/p", "15", "application/x-www-form-urlencoded")
+                + httpLine("2", "10.0.0.1", "192.0.2.10", 50000, 443, 5, "9", "1", "21", hex("qty=2&email=a@b.test"))
+                // Response DATA on the same stream must be ignored.
+                + httpLine("3", "192.0.2.10", "10.0.0.1", 443, 50000, 5, "9", "1", "21", hex("you cannot read this as a request"))
+                // HTTP/1 GET on stream 9 with a binary body.
+                + httpLine("4", "10.0.0.1", "192.0.2.20", 50001, 443, 9, "16", "GET", "17", "old.test", "18", "/h1?x=1",
+                        "23", "00:01:02:ff:fe:00:01:02:ff:fe"));
+        var requests = result.requests();
+        assertEquals(2, requests.size());
+        HttpRequest post = requests.getFirst();
+        assertEquals("POST", post.method()); assertEquals("shop.test", post.host()); assertEquals("/cart?lat=45.1", post.path());
+        assertTrue(post.decrypted()); assertEquals(10123, post.app().uid());
+        assertEquals("qty=2&email=a@b.test", post.body()); assertEquals(20, post.bodyBytes()); assertFalse(post.bodyBinary());
+        assertEquals(List.of("cookie", "referer", "content-type"), post.headerNames());
+        assertTrue(post.hasHeader("cookie")); assertEquals("https://ref.test/p", post.referer());
+        assertEquals("application/x-www-form-urlencoded", post.contentType());
+        HttpRequest h1 = requests.getLast();
+        assertEquals("old.test", h1.host()); assertEquals("/h1?x=1", h1.path());
+        assertTrue(h1.bodyBinary()); assertEquals("", h1.body()); assertEquals(10, h1.bodyBytes());
+    }
+    @Test void boundsBodyLengthPerRequest() {
+        String big = "a".repeat(TsharkTrafficAnalyzer.MAX_BODY_BYTES + 500);
+        var requests = TsharkTrafficAnalyzer.parseRequests(
+                httpLine("1", "10.0.0.1", "192.0.2.10", 50000, 443, 5, "9", "1", "10", "POST", "12", "/x")
+                + httpLine("2", "10.0.0.1", "192.0.2.10", 50000, 443, 5, "9", "1", "21", hex(big))).requests();
+        HttpRequest r = requests.getFirst();
+        assertEquals(TsharkTrafficAnalyzer.MAX_BODY_BYTES, r.bodyBytes()); assertTrue(r.bodyTruncated());
+    }
+    @Test void passesCaptureAsSingleArgumentAndDisablesNameResolution() throws Exception {
+        Path capture = Files.write(temp.resolve("capture with spaces.pcap"), new byte[]{1});
+        List<List<String>> seen = new ArrayList<>();
+        var analyzer = new TsharkTrafficAnalyzer("tshark", (args, timeout) -> { seen.add(args); return ""; });
+        var analysis = analyzer.analyze(capture);
+        assertEquals(capture.toAbsolutePath().toString(), seen.getFirst().get(3));
+        assertEquals("-n", seen.getFirst().get(1)); assertFalse(seen.getFirst().contains("-i"));
+        assertEquals("capture with spaces.pcap", analysis.fileName()); assertEquals(1, analysis.fileBytes());
+        assertEquals("4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a", analysis.sha256());
+        assertThrows(ScanException.class, () -> analyzer.analyze(temp.resolve("missing.pcap")));
+        assertEquals(2, seen.size(), "One pass for flows, one for HTTP");
+    }
+    @Test void acceptsOnlyTruncationAsPartialResult() throws Exception {
+        Path capture = Files.write(temp.resolve("capture.pcap"), new byte[]{1});
+        String packet = line("1", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 40);
+        var truncated = new TsharkTrafficAnalyzer("tshark", flowOnly(2, packet, "tshark: The file \"x\" appears to have been cut short in the middle of a packet.")).analyze(capture);
+        assertTrue(truncated.truncated()); assertEquals(1, truncated.flows().size());
+        assertTrue(truncated.warnings().stream().anyMatch(w -> w.contains("parziale")));
+        var error = assertThrows(ScanException.class,
+                () -> new TsharkTrafficAnalyzer("tshark", flowOnly(2, packet, "tshark: The file \"x\" is not a capture file in a format TShark understands.")).analyze(capture));
+        assertTrue(error.getMessage().contains("is not a capture file"), "The reason given by TShark must reach the user");
     }
     @Test void passesAValidatedKeylogToTheDecoder() throws Exception {
         Path capture = Files.write(temp.resolve("capture.pcap"), new byte[]{1});
@@ -128,34 +181,16 @@ class TsharkTrafficAnalyzerTest {
         Path notKeys = Files.writeString(temp.resolve("notes.txt"), "these are not keys\n");
         assertThrows(ScanException.class, () -> analyzer.analyze(capture, notKeys));
         assertThrows(ScanException.class, () -> analyzer.analyze(capture, temp.resolve("missing.keylog")));
-        assertEquals(2, seen.size(), "A rejected key file must not start the decoder");
+        assertEquals(4, seen.size(), "Two analyses of two passes each; a rejected key file starts nothing");
     }
-    @Test void passesCaptureAsSingleArgumentAndDisablesNameResolution() throws Exception {
-        Path capture = Files.write(temp.resolve("capture with spaces.pcap"), new byte[]{1});
-        List<List<String>> seen = new ArrayList<>();
-        var analyzer = new TsharkTrafficAnalyzer("tshark", (args, timeout) -> { seen.add(args); return ""; });
-        var analysis = analyzer.analyze(capture);
-        assertEquals(capture.toAbsolutePath().toString(), seen.getFirst().get(3));
-        assertEquals("-n", seen.getFirst().get(1)); assertFalse(seen.getFirst().contains("-i"));
-        assertEquals("capture with spaces.pcap", analysis.fileName()); assertEquals(1, analysis.fileBytes());
-        assertEquals("4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a", analysis.sha256());
-        assertThrows(ScanException.class, () -> analyzer.analyze(temp.resolve("missing.pcap")));
-        assertEquals(1, seen.size());
-    }
-    @Test void acceptsOnlyTruncationAsPartialResult() throws Exception {
-        Path capture = Files.write(temp.resolve("capture.pcap"), new byte[]{1});
-        String packet = line("1", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 40);
-        var truncated = new TsharkTrafficAnalyzer("tshark", runner(2, packet, "tshark: The file \"x\" appears to have been cut short in the middle of a packet.")).analyze(capture);
-        assertTrue(truncated.truncated()); assertEquals(1, truncated.flows().size());
-        assertTrue(truncated.warnings().stream().anyMatch(w -> w.contains("parziale")));
-        var error = assertThrows(ScanException.class,
-                () -> new TsharkTrafficAnalyzer("tshark", runner(2, packet, "tshark: The file \"x\" is not a capture file in a format TShark understands.")).analyze(capture));
-        assertTrue(error.getMessage().contains("is not a capture file"), "The reason given by TShark must reach the user");
-    }
-    private static CommandRunner runner(int exit, String stdout, String stderr) {
+    /** Returns the flow-pass output (and its exit code) only; the HTTP pass gets empty output. */
+    private static CommandRunner flowOnly(int exit, String flowStdout, String stderr) {
         return new CommandRunner() {
             @Override public String run(List<String> arguments, Duration timeout) { throw new AssertionError("execute expected"); }
-            @Override public CommandResult execute(List<String> arguments, Duration timeout) { return new CommandResult(exit, stdout, stderr); }
+            @Override public CommandResult execute(List<String> arguments, Duration timeout) {
+                boolean http = arguments.contains("tcp.stream");
+                return new CommandResult(exit, http ? "" : flowStdout, stderr);
+            }
         };
     }
 }

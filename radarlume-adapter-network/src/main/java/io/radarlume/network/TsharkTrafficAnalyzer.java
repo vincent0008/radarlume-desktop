@@ -28,6 +28,10 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
     static final int MAX_REQUESTS = 20_000;
     static final int MAX_PATH_CHARS = 2_000;
 
+    public static final int MAX_BODY_BYTES = 64 * 1024;
+    static final int MAX_BODY_CHARS = 8_000;
+    static final long MAX_TOTAL_BODY_BYTES = 8L * 1024 * 1024;
+
     /** Order matters: {@link #parse} reads the columns by these positions. */
     private static final List<String> FIELDS = List.of(
             "frame.time_epoch", "ip.src", "ipv6.src", "ip.dst", "ipv6.dst",
@@ -35,8 +39,23 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
             "frame.len", "ip.len", "ipv6.plen",
             "dns.qry.name", "dns.flags.response", "dns.a", "dns.aaaa",
             "tls.handshake.extensions_server_name", "eth.trailer", "http.host",
-            "frame.protocols", "http.request.method", "http.request.uri",
-            "http2.headers.method", "http2.headers.authority", "http2.headers.path");
+            "frame.protocols");
+    /**
+     * Second pass, only over HTTP packets: request headers and bodies, which the first pass cannot carry safely.
+     * All of these are tab-free (tokens, URLs or colon-hex), so the field-count invariant still holds; bodies are
+     * read as hex so that spaces, tabs and arbitrary bytes inside them never break the columns.
+     */
+    // Request definitions always; bodies only in the request direction (client port above the server port), so that
+    // large response bodies never enter the output. parseRequests still checks the direction exactly, per stream.
+    private static final String HTTP_FILTER = "http.request.method or http2.headers.method"
+            + " or ((http2.data.data or http.file_data) and tcp.dstport < tcp.srcport)";
+    private static final List<String> HTTP_FIELDS = List.of(
+            "frame.time_epoch", "ip.src", "ipv6.src", "ip.dst", "ipv6.dst", "tcp.srcport", "tcp.dstport",
+            "eth.trailer", "tcp.stream", "http2.streamid",
+            "http2.headers.method", "http2.headers.authority", "http2.headers.path", "http2.header.name",
+            "http2.headers.referer", "http2.headers.content_type",
+            "http.request.method", "http.host", "http.request.uri", "http.referer", "http.content_type",
+            "http2.data.data", "http2.body.reassembled.data", "http.file_data");
     /** Repeated fields are joined with a space: unlike a comma it cannot appear inside a request path, a name or an address. */
     private static final String MANY = " ";
     private static final java.util.regex.Pattern KEYLOG_LINE = java.util.regex.Pattern.compile("[A-Z0-9_]+ [0-9a-fA-F]+ [0-9a-fA-F]+");
@@ -64,28 +83,39 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
         }
         if (keylog != null) checkKeylog(keylog);
         String sha256 = sha256(capture);
+        var flowResult = runTshark(capture, keylog, FILTER, FIELDS);
+        boolean truncated = flowResult.exitCode() != 0;
+        var base = parse(flowResult.stdout(), capture.getFileName().toString(), size, sha256, truncated, keylog != null);
+
+        // Second pass over HTTP packets only: headers and bodies. A failure here must not lose the flow analysis.
+        var http = parseRequests(runTshark(capture, keylog, HTTP_FILTER, HTTP_FIELDS).stdout());
+        var warnings = new ArrayList<>(base.warnings());
+        if (http.limitHit())
+            warnings.add("Elenco delle richieste HTTP incompleto: superato il limite di " + MAX_REQUESTS + ".");
+        return new CaptureAnalysis(base.fileName(), base.fileBytes(), base.sha256(), base.packets(), base.firstPacket(),
+                base.lastPacket(), base.appMetadata(), base.truncated(), base.flows(), base.dnsNames(), warnings,
+                base.tls(), http.requests());
+    }
+
+    /** Runs one TShark field extraction. A file cut short mid-packet is accepted (exit code kept); anything else throws. */
+    private CommandRunner.CommandResult runTshark(Path capture, Path keylog, String filter, List<String> fields) {
         var command = new ArrayList<>(List.of(executable, "-n", "-r", capture.toAbsolutePath().toString(),
-                "-Y", FILTER, "-T", "fields", "-E", "separator=/t", "-E", "occurrence=a", "-E", "aggregator=/s"));
+                "-Y", filter, "-T", "fields", "-E", "separator=/t", "-E", "occurrence=a", "-E", "aggregator=/s"));
         if (keylog != null) {
             command.add("-o");
             command.add("tls.keylog_file:" + keylog.toAbsolutePath());
         }
-        for (String field : FIELDS) {
+        for (String field : fields) {
             command.add("-e");
             command.add(field);
         }
         var result = runner.execute(command, Duration.ofSeconds(90));
-        boolean truncated = false;
-        if (result.exitCode() != 0) {
-            // TShark still prints every complete packet of a file that ends mid-packet (typical of an
-            // interrupted export). That is usable as long as the result is clearly marked as partial.
-            // Any other failure is rejected.
-            if (!result.stderr().contains("cut short"))
-                throw new ScanException("TShark non ha potuto leggere la cattura (codice " + result.exitCode() + ")"
-                        + BoundedProcessRunner.detail(result.stderr()) + ". Nessun risultato utilizzato.");
-            truncated = true;
-        }
-        return parse(result.stdout(), capture.getFileName().toString(), size, sha256, truncated, keylog != null);
+        // TShark still prints every complete packet of a file that ends mid-packet (typical of an interrupted
+        // export). That is usable as long as the result is clearly marked as partial. Any other failure is rejected.
+        if (result.exitCode() != 0 && !result.stderr().contains("cut short"))
+            throw new ScanException("TShark non ha potuto leggere la cattura (codice " + result.exitCode() + ")"
+                    + BoundedProcessRunner.detail(result.stderr()) + ". Nessun risultato utilizzato.");
+        return result;
     }
 
     /** The key file is as untrusted as the capture: bounded size and the expected line format, or nothing is used. */
@@ -140,10 +170,8 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
     }
 
     public static CaptureAnalysis parse(String output, String fileName, long fileBytes, String sha256, boolean truncated, boolean keylogUsed) {
-        var requests = new ArrayList<HttpRequest>();
         var tlsConnections = new HashSet<String>();
         var decryptedConnections = new HashSet<String>();
-        boolean requestLimitHit = false;
         var flows = new LinkedHashMap<Key, FlowTotals>();
         var dns = new LinkedHashMap<String, DnsTotals>();
         long packets = 0;
@@ -194,15 +222,6 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
                 if (app != null || f[17].replace(":", "").contains(PCAPDROID_MAGIC)) trailerSeen = true;
                 if (flow.app == null) flow.app = app;
 
-                // HTTP/1 carries one request per packet; HTTP/2 can carry several, listed in the same order in the three fields.
-                boolean http1 = !f[20].isEmpty();
-                String[] methods = many(http1 ? f[20] : f[22]), hosts = many(http1 ? f[18] : f[23]), paths = many(http1 ? f[21] : f[24]);
-                for (int i = 0; i < methods.length; i++) {
-                    if (requests.size() >= MAX_REQUESTS) { requestLimitHit = true; break; }
-                    requests.add(new HttpRequest(time, dst, flow.app, token(methods[i]),
-                            name(hostOnly(i < hosts.length ? hosts[i] : "")), path(i < paths.length ? paths[i] : ""), tls));
-                }
-
                 String query = name(first(f[12]));
                 if (!query.isEmpty()) {
                     DnsTotals total = dns.get(query);
@@ -233,8 +252,6 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
             warnings.add("App indicate dai metadati PCAPdroid, non dedotte da RadarLume. È il nome visualizzato dell'app, troncato a 19 byte: per distinguere due app usare l'UID.");
         else
             warnings.add("La cattura non contiene metadati sulle app leggibili da RadarLume: nessuna attribuzione.");
-        if (requestLimitHit)
-            warnings.add("Elenco delle richieste HTTP incompleto: superato il limite di " + MAX_REQUESTS + ".");
         if (keylogUsed && decryptedConnections.isEmpty())
             warnings.add("Il file delle chiavi TLS non ha permesso di leggere alcuna connessione: potrebbe appartenere a un'altra cattura.");
         if (dnsLimitHit)
@@ -248,7 +265,170 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
                         e.getValue().first, e.getValue().last, e.getValue().app, e.getValue().serverName, e.getValue().httpHost)).toList(),
                 dns.entrySet().stream().map(e -> new DnsName(e.getKey(), e.getValue().queries, e.getValue().responses,
                         List.copyOf(e.getValue().addresses), e.getValue().first, e.getValue().last)).toList(),
-                warnings, new CaptureAnalysis.Tls(keylogUsed, tlsConnections.size(), decryptedConnections.size()), requests);
+                warnings, new CaptureAnalysis.Tls(keylogUsed, tlsConnections.size(), decryptedConnections.size()), List.of());
+    }
+
+    /** A request under construction, built from several packets of one HTTP/2 stream (or one HTTP/1 request). */
+    private static final class Req {
+        Instant time; String dst, clientSrc, clientSport;
+        CaptureApp app;
+        String method = "", host = "", path = "", referer = "", origin = "", contentType = "";
+        List<String> headerNames = List.of();
+        final java.io.ByteArrayOutputStream body = new java.io.ByteArrayOutputStream();
+        boolean complete, truncated;
+    }
+
+    /** Result of the HTTP pass: the requests and whether the request limit cut the list short. */
+    public record Requests(List<HttpRequest> requests, boolean limitHit) {
+        public Requests { requests = List.copyOf(requests); }
+    }
+
+    /**
+     * Parses the HTTP-only second pass. Request definitions (HTTP/2 HEADERS, HTTP/1 request lines) and request
+     * bodies (HTTP/2 DATA, HTTP/1 file data) arrive on different packets, joined here by TCP stream and HTTP/2
+     * stream id. Only request-direction bodies are kept; responses are ignored.
+     */
+    public static Requests parseRequests(String output) {
+        var byKey = new LinkedHashMap<String, Req>();
+        var lastH1ByStream = new HashMap<String, Req>();
+        boolean limitHit = false;
+        long totalBody = 0;
+        int h1Counter = 0;
+
+        for (String line : output.lines().toList()) {
+            if (Thread.currentThread().isInterrupted()) throw new ScanException("Importazione annullata.");
+            if (line.isBlank()) continue;
+            String[] f = line.split("\t", -1);
+            if (f.length != HTTP_FIELDS.size())
+                throw new ScanException("Formato TShark inatteso (HTTP): sono richiesti " + HTTP_FIELDS.size() + " campi.");
+            try {
+                String src = first(f[1].isEmpty() ? f[2] : f[1]), dst = first(f[3].isEmpty() ? f[4] : f[3]);
+                String sport = first(f[5]), dport = first(f[6]);
+                if (src.isBlank() || dst.isBlank() || sport.isBlank()) continue;
+                Instant time = time(f[0]);
+                CaptureApp app = pcapdroidApp(f[7]);
+                String stream = first(f[8]);
+
+                // HTTP/2 request definitions: one per HEADERS frame. Trust the stream id only when its count matches.
+                String[] methods = many(f[10]);
+                if (methods.length > 0) {
+                    String[] sids = many(f[9]), auths = many(f[11]), paths = many(f[12]);
+                    boolean aligned = sids.length == methods.length;
+                    for (int i = 0; i < methods.length; i++) {
+                        if (byKey.size() >= MAX_REQUESTS) { limitHit = true; break; }
+                        String sid = aligned ? sids[i] : "?" + (byKey.size());
+                        Req r = byKey.computeIfAbsent(stream + "#" + sid, k -> new Req());
+                        fillRequest(r, time, dst, app, src, sport, token(methods[i]),
+                                name(hostOnly(i < auths.length ? auths[i] : "")), path(i < paths.length ? paths[i] : ""));
+                        if (methods.length == 1) {              // headers align with the request only when the packet holds one
+                            r.headerNames = headerNames(f[13]);
+                            r.referer = url(f[14]); r.contentType = headerValue(f[15]);
+                        }
+                    }
+                }
+
+                // HTTP/1 request: one per packet. No stream id, so key by stream and a counter.
+                if (!f[16].isEmpty()) {
+                    if (byKey.size() >= MAX_REQUESTS) limitHit = true;
+                    else {
+                        Req r = new Req();
+                        fillRequest(r, time, dst, app, src, sport, token(first(f[16])),
+                                name(hostOnly(first(f[17]))), path(first(f[18])));
+                        r.referer = url(f[19]); r.contentType = headerValue(f[20]);
+                        byKey.put(stream + "#h1#" + h1Counter++, r);
+                        lastH1ByStream.put(stream, r);
+                    }
+                }
+
+                // Bodies. HTTP/2 DATA frames are matched to their request by stream id and direction; HTTP/1 file
+                // data is attached to the most recent HTTP/1 request on the same TCP stream.
+                if (!f[21].isEmpty() || !f[22].isEmpty()) {
+                    boolean reassembled = !f[22].isEmpty();
+                    String[] sids = many(f[9]), chunks = many(reassembled ? f[22] : f[21]);
+                    for (int i = 0; i < chunks.length; i++) {
+                        String sid = sids.length == chunks.length ? sids[i] : (sids.length == 1 ? sids[0] : "");
+                        Req r = byKey.get(stream + "#" + sid);
+                        // Only the request side (client → server) is a request body.
+                        if (r == null || !src.equals(r.clientSrc) || !sport.equals(r.clientSport)) continue;
+                        totalBody = appendBody(r, hex(chunks[i]), reassembled, totalBody);
+                    }
+                }
+                if (!f[23].isEmpty()) {
+                    Req r = lastH1ByStream.get(stream);
+                    if (r != null) totalBody = appendBody(r, hex(f[23]), false, totalBody);
+                }
+            } catch (IllegalArgumentException | ArithmeticException e) {
+                throw new ScanException("Campi TShark non validi (HTTP).", e);
+            }
+        }
+        var requests = byKey.values().stream().map(TsharkTrafficAnalyzer::toRequest).toList();
+        return new Requests(requests, limitHit);
+    }
+
+    private static void fillRequest(Req r, Instant time, String dst, CaptureApp app, String clientSrc, String clientSport,
+                                    String method, String host, String path) {
+        if (r.time == null) { r.time = time; r.dst = dst; r.app = app; r.clientSrc = clientSrc; r.clientSport = clientSport; }
+        if (r.method.isEmpty()) { r.method = method; r.host = host; r.path = path; }
+    }
+
+    /** Appends body bytes within the per-request and overall limits. A reassembled chunk is the complete body. */
+    private static long appendBody(Req r, byte[] bytes, boolean complete, long total) {
+        if (r.complete) return total;                       // the full body is already known
+        if (complete) { r.body.reset(); r.complete = true; }
+        int room = (int) Math.min(MAX_BODY_BYTES - r.body.size(), MAX_TOTAL_BODY_BYTES - total);
+        if (room <= 0) { if (bytes.length > 0) r.truncated = true; return total; }
+        int take = Math.min(room, bytes.length);
+        r.body.write(bytes, 0, take);
+        if (take < bytes.length) r.truncated = true;
+        return total + take;
+    }
+
+    private static HttpRequest toRequest(Req r) {
+        byte[] raw = r.body.toByteArray();
+        boolean binary = looksBinary(raw);
+        String body = binary || raw.length == 0 ? "" : bodyText(new String(raw, StandardCharsets.UTF_8));
+        return new HttpRequest(r.time, r.dst, r.app, r.method, r.host, r.path, r.clientSport != null,
+                r.headerNames, r.referer, r.origin, r.contentType, body, raw.length, binary && raw.length > 0, r.truncated);
+    }
+
+    private static byte[] hex(String colonHex) {
+        String h = colonHex.replace(":", "").replace(MANY, "");
+        if (h.isEmpty() || (h.length() & 1) != 0 || !h.matches("[0-9a-fA-F]+")) return new byte[0];
+        return HexFormat.of().parseHex(h);
+    }
+
+    /** More than a tenth non-text bytes, or any NUL, means we treat the body as binary and do not show it. */
+    private static boolean looksBinary(byte[] raw) {
+        if (raw.length == 0) return false;
+        int bad = 0;
+        for (byte b : raw) {
+            int c = b & 0xff;
+            if (c == 0) return true;
+            if (c < 0x09 || (c > 0x0d && c < 0x20)) bad++;
+        }
+        return bad * 10 > raw.length;
+    }
+
+    private static String bodyText(String decoded) {
+        String clean = decoded.replaceAll("[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]", "·");
+        return clean.length() <= MAX_BODY_CHARS ? clean : clean.substring(0, MAX_BODY_CHARS) + "…";
+    }
+
+    /** Header names are lower-case tokens; keep only well-formed ones, de-duplicated and bounded. */
+    private static List<String> headerNames(String aggregated) {
+        var names = new java.util.LinkedHashSet<String>();
+        for (String n : many(aggregated))
+            if (n.matches("[a-z0-9:_-]{1,40}") && names.size() < 60) names.add(n);
+        return List.copyOf(names);
+    }
+
+    /** A Referer/Origin URL is shown as-is but sanitised and bounded. */
+    private static String url(String raw) { return bodyText(first(raw)); }
+
+    /** A Content-Type is a single header value with no tab; keep it printable and bounded. */
+    private static String headerValue(String raw) {
+        String clean = raw.replaceAll("[^\\x20-\\x7e]", "?");
+        return clean.length() <= 200 ? clean : clean.substring(0, 200);
     }
 
     private static String first(String aggregated) {

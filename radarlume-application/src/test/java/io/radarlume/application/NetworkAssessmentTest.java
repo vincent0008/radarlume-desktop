@@ -31,7 +31,11 @@ class NetworkAssessmentTest {
                 flows, List.of(), List.of(), tls, List.of(requests));
     }
     private static HttpRequest request(String host, String path, boolean decrypted) {
-        return new HttpRequest(Instant.EPOCH, "192.0.2.10", APP, "GET", host, path, decrypted);
+        return req(host, "GET", path, decrypted, "", "", List.of());
+    }
+    private static HttpRequest req(String host, String method, String path, boolean decrypted, String body, String referer, List<String> headers) {
+        return new HttpRequest(Instant.EPOCH, "192.0.2.10", APP, method, host, path, decrypted, headers, referer, "",
+                body.isEmpty() ? "" : "application/x-www-form-urlencoded", body, body.length(), false, false);
     }
 
     @Test void parameterNamesSuggestingPersonalDataAreReportedWithoutTheirValues() {
@@ -52,6 +56,27 @@ class NetworkAssessmentTest {
         assertTrue(mail.explanation().contains("forma di indirizzo email") && mail.explanation().contains("senza cifratura"));
         assertFalse(mail.explanation().contains("mario"));
         assertEquals(Finding.Confidence.LOW, ads.confidence());
+    }
+    @Test void scansBodyRefererAndAuthorizationHeaderToo() {
+        var findings = NetworkAssessmentService.evaluate(withRequests(new CaptureAnalysis.Tls(true, 3, 3),
+                req("api.test", "POST", "/login", true, "user=mario&password=hunter2&lat=45.1", "", List.of("content-type")),
+                req("api.test", "GET", "/me", true, "", "", List.of("authorization", "cookie")),
+                req("track.test", "GET", "/p", true, "", "https://track.test/x?email=a%40b.test", List.of())));
+        var byRule = findings.stream().collect(java.util.stream.Collectors.groupingBy(Finding::ruleId));
+        assertEquals(2, byRule.get("NET-004").size());
+        Finding api = byRule.get("NET-004").stream().filter(x -> x.evidenceKey().contains("api.test")).findFirst().orElseThrow();
+        assertTrue(api.explanation().contains("credenziale:") && api.explanation().contains("password")
+                && api.explanation().contains("(intestazione Authorization)"), api.explanation());
+        assertTrue(api.explanation().contains("posizione: lat"));
+        assertFalse(api.explanation().contains("hunter2"), "Body values must not appear");
+        Finding track = byRule.get("NET-004").stream().filter(x -> x.evidenceKey().contains("track.test")).findFirst().orElseThrow();
+        assertTrue(track.explanation().contains("forma di indirizzo email"));
+    }
+    @Test void jsonBodyIsNotMisreadAsFormParameters() {
+        var request = new HttpRequest(Instant.EPOCH, "192.0.2.10", APP, "POST", "api.test", "/e", true, List.of(),
+                "", "", "application/json", "{\"note\":\"password=x should not count\"}", 36, false, false);
+        assertTrue(NetworkAssessmentService.evaluate(withRequests(new CaptureAnalysis.Tls(true, 1, 1), request)).stream()
+                .noneMatch(f -> f.ruleId().equals("NET-004")));
     }
     private static List<String> rules(List<Finding> findings) { return findings.stream().map(Finding::ruleId).toList(); }
 
