@@ -4,3 +4,4 @@
 .table-view { -fx-background-color: white; -fx-border-color: #d6e1eb; }
 .tab-pane > .tab-header-area .tab-header-background { -fx-background-color: #dfe9f2; }
 .label { -fx-text-fill: #243c50; }
+.mono { -fx-font-family: "Consolas", "Courier New", monospace; -fx-font-size: 12.5px; }

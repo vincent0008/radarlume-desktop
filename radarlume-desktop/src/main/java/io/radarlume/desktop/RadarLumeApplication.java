@@ -6,6 +6,7 @@ import io.radarlume.application.AndroidAssessmentService;
 import io.radarlume.application.AppInventoryAssessmentService;
 import io.radarlume.application.DeviceScanService;
 import io.radarlume.application.NetworkAssessmentService;
+import io.radarlume.application.UnpinningPlanService;
 import io.radarlume.domain.*;
 import io.radarlume.network.TsharkTrafficAnalyzer;
 import io.radarlume.process.BoundedProcessRunner;
@@ -20,6 +21,7 @@ import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import javafx.stage.*;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
@@ -50,6 +52,7 @@ public final class RadarLumeApplication extends Application {
     private final Label inventoryLabel = new Label("Nessun inventario acquisito");
     private final Label networkLabel = new Label("Nessuna cattura importata");
     private Inventory inventory;
+    private UnpinningPlan lastPlan;
     private Task<?> active;
     private InventoryRepository repository;
     private SettingsRepository settingsRepository;
@@ -64,7 +67,8 @@ public final class RadarLumeApplication extends Application {
         scope.setWrapText(true); scope.setMinHeight(Region.USE_PREF_SIZE);
         VBox header = new VBox(6, title, subtitle, scope); header.setPadding(new Insets(22));
         ScrollPane settings = new ScrollPane(settingsPane(db)); settings.setFitToWidth(true);
-        TabPane tabs = new TabPane(tab("Android", androidPane()), tab("Rete / PCAP", networkPane(stage)), tab("Impostazioni e dati", settings));
+        TabPane tabs = new TabPane(tab("Android", androidPane()), tab("Rete / PCAP", networkPane(stage)),
+                tab("Unpinning (assistito)", unpinningPane(stage)), tab("Impostazioni e dati", settings));
         Button cancel = new Button("Annulla"); cancel.disableProperty().bind(busy.not());
         cancel.setOnAction(e -> { if (active != null) active.cancel(true); });
         ProgressIndicator progress = new ProgressIndicator(); progress.setPrefSize(22,22); progress.visibleProperty().bind(busy);
@@ -79,6 +83,71 @@ public final class RadarLumeApplication extends Application {
             status.setText(saved.isPresent() ? "Percorsi salvati caricati. Pronto." : "Pronto. Configura e salva i percorsi degli strumenti.");
         });
     }
+    private javafx.scene.Node unpinningPane(Stage stage) {
+        Label intro = new Label("Per le app che rifiutano il certificato di intercettazione. RadarLume non esegue nulla e non decifra da solo: "
+                + "genera script, comandi e verifica che applichi tu, su un dispositivo di test, con strumenti gratuiti e open source. "
+                + "Nessuna tecnica è garantita. La verifica si chiude qui: dopo l'intervento reimporta la cattura e guarda DATA-007.");
+        intro.setWrapText(true);
+        ComboBox<String> pkg = new ComboBox<>(); pkg.setEditable(true); pkg.setPromptText("Nome pacchetto (es. com.example.app)"); pkg.setPrefWidth(340);
+        Runnable refresh = () -> { String typed = pkg.getEditor().getText(); pkg.getItems().setAll(apps.stream().map(InstalledApp::packageName).toList()); pkg.getEditor().setText(typed); };
+        apps.addListener((ListChangeListener<InstalledApp>) c -> refresh.run()); refresh.run();
+        ComboBox<UnpinningTechnique> technique = new ComboBox<>(FXCollections.observableArrayList(UnpinningTechnique.values()));
+        technique.setConverter(new javafx.util.StringConverter<>() {
+            @Override public String toString(UnpinningTechnique t) { return t == null ? "" : t.label(); }
+            @Override public UnpinningTechnique fromString(String s) { return null; }
+        });
+        technique.getSelectionModel().selectFirst();
+        Button generate = new Button("Genera piano");
+        Button saveFiles = new Button("Salva script e guida…"); saveFiles.setDisable(true);
+        TextArea out = new TextArea(); out.setEditable(false); out.setWrapText(true); out.getStyleClass().add("mono"); out.setPromptText("Il piano apparirà qui.");
+        generate.setOnAction(e -> {
+            try {
+                UnpinningPlan plan = UnpinningPlanService.plan(pkg.getEditor().getText(), technique.getValue(), adbPath.getText());
+                lastPlan = plan; out.setText(renderPlan(plan)); saveFiles.setDisable(false);
+                status.setText("Piano generato per " + plan.packageName() + " · " + plan.technique().label() + ". Niente è stato eseguito sul dispositivo.");
+            } catch (IllegalArgumentException ex) {
+                lastPlan = null; saveFiles.setDisable(true); out.clear();
+                status.setText("Nome pacchetto non valido: usa il nome tecnico, es. com.example.app.");
+            }
+        });
+        saveFiles.setOnAction(e -> {
+            UnpinningPlan plan = lastPlan; if (plan == null) return;
+            DirectoryChooser chooser = new DirectoryChooser(); chooser.setTitle("Cartella dove salvare script e guida");
+            java.io.File dir = chooser.showDialog(stage); if (dir == null) return;
+            run("Salvataggio piano…", () -> {
+                Path base = dir.toPath();
+                Files.writeString(base.resolve(plan.packageName() + "-unpinning.txt"), renderPlan(plan));
+                if (plan.hasScript()) Files.writeString(base.resolve(plan.scriptFileName()), plan.scriptContent());
+                return base.toString();
+            }, path -> status.setText("Salvati in " + path + (plan.hasScript() ? " (guida + " + plan.scriptFileName() + ")." : " (guida).")));
+        });
+        Label note = new Label("Lo script Frida neutralizza le verifiche di certificato più comuni (Conscrypt, SSLContext, OkHttp). "
+                + "Il pinning nativo, l'offuscamento e gli anti-Frida possono renderlo inefficace: in quel caso l'app resta non decifrabile, e va detto nel referto.");
+        note.setWrapText(true);
+        VBox controls = new VBox(8, new HBox(12, new Label("App:"), pkg), new HBox(12, new Label("Tecnica:"), technique), new HBox(12, generate, saveFiles));
+        VBox pane = pane(intro, controls, out, note); VBox.setVgrow(out, Priority.ALWAYS); return pane;
+    }
+
+    private static String renderPlan(UnpinningPlan p) {
+        StringBuilder b = new StringBuilder();
+        b.append("UNPINNING ASSISTITO — ").append(p.technique().label()).append("\n");
+        b.append("App bersaglio: ").append(p.packageName()).append("\n");
+        b.append("Strumenti gratuiti e open source. RadarLume non esegue nulla: i passi vanno eseguiti su un dispositivo di test.\n\n");
+        b.append("PREREQUISITI\n"); p.prerequisites().forEach(x -> b.append("  - ").append(x).append("\n"));
+        b.append("\nPASSI\n");
+        int i = 1;
+        for (var s : p.steps()) {
+            b.append("  ").append(i++).append(". ").append(s.title()).append("\n");
+            if (!s.detail().isBlank()) b.append("     ").append(s.detail()).append("\n");
+            if (s.hasCommand()) b.append("     $ ").append(s.command()).append("\n");
+        }
+        b.append("\nVERIFICA (si chiude in RadarLume)\n"); p.verification().forEach(x -> b.append("  - ").append(x).append("\n"));
+        b.append("\nLIMITI\n"); p.limits().forEach(x -> b.append("  - ").append(x).append("\n"));
+        b.append("\nUSO RESPONSABILE\n"); p.safety().forEach(x -> b.append("  - ").append(x).append("\n"));
+        if (p.hasScript()) b.append("\nSCRIPT: ").append(p.scriptFileName()).append(" (salvato nella stessa cartella).\n");
+        return b.toString();
+    }
+
     private Tab tab(String title, javafx.scene.Node content) { Tab tab = new Tab(title, content); tab.setClosable(false); return tab; }
     private DeviceScanService service() {
         return new DeviceScanService(new AdbDeviceInspector(tool(adbPath), new BoundedProcessRunner(4 * 1024 * 1024)), Clock.systemUTC());

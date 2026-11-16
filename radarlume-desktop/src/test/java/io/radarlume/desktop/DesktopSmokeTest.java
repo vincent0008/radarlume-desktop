@@ -25,7 +25,7 @@ class DesktopSmokeTest {
                 var scene = stage.getScene(); var root = scene.getRoot();
                 root.applyCss(); root.layout();
                 TabPane tabs = (TabPane) root.lookup(".tab-pane");
-                assertEquals(3, tabs.getTabs().size());
+                assertEquals(4, tabs.getTabs().size());
                 Button scan = root.lookupAll(".button").stream().filter(Button.class::isInstance).map(Button.class::cast)
                         .filter(b -> b.getText().equals("Leggi inventario")).findFirst().orElseThrow();
                 assertTrue(scan.isDisabled(), "Scan must require both selected device and consent");
