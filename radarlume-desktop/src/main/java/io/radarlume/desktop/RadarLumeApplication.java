@@ -200,13 +200,37 @@ public final class RadarLumeApplication extends Application {
         http.getColumns().add(column("Trasporto", r -> r.decrypted() ? "TLS decifrato" : "IN CHIARO", 110));
         http.getColumns().add(column("Metodo", HttpRequest::method, 70));
         http.getColumns().add(column("Host", HttpRequest::host, 230));
-        http.getColumns().add(column("Percorso e parametri", HttpRequest::path, 700));
-        http.getColumns().add(column("Destinazione", HttpRequest::destination, 140));
+        http.getColumns().add(column("Percorso e parametri", HttpRequest::path, 520));
+        http.getColumns().add(column("Corpo", RadarLumeApplication::bodyCell, 150));
         http.setPlaceholder(new Label("Nessuna richiesta HTTP leggibile. Senza il file .keylog di PCAPdroid si vedono solo le richieste non cifrate."));
+        // Headers and body can be long and may contain personal data: shown on demand, only for the selected request.
+        TextArea detail = new TextArea(); detail.setEditable(false); detail.setWrapText(true); detail.setPrefRowCount(10);
+        detail.setPromptText("Seleziona una richiesta per vederne intestazioni e corpo.");
+        http.getSelectionModel().selectedItemProperty().addListener((o, a, r) -> detail.setText(r == null ? "" : requestDetail(r)));
+        VBox httpBox = new VBox(6, http, new Label("Dettaglio della richiesta selezionata (resta in memoria, non salvato):"), detail);
+        VBox.setVgrow(http, Priority.ALWAYS);
         networkFindings.setEditable(false); networkFindings.setWrapText(true);
-        results.getTabs().setAll(tab("Osservazioni", networkFindings), tab("Flussi", table), tab("Richieste HTTP", http), tab("Nomi DNS in chiaro", dns));
+        results.getTabs().setAll(tab("Osservazioni", networkFindings), tab("Flussi", table), tab("Richieste HTTP", httpBox), tab("Nomi DNS in chiaro", dns));
         useKeylog.setSelected(true);
         VBox pane = pane(note, new HBox(12, open, useKeylog), networkLabel, results); VBox.setVgrow(results, Priority.ALWAYS); return pane;
+    }
+    private static String bodyCell(HttpRequest r) {
+        if (r.bodyBinary()) return r.bodyBytes() + " byte binari";
+        if (r.bodyBytes() == 0) return "";
+        return r.bodyBytes() + " byte" + (r.bodyTruncated() ? " (troncato)" : "");
+    }
+    /** Full view of the selected request: metadata, headers present and the body text, shown only on selection. */
+    private static String requestDetail(HttpRequest r) {
+        StringBuilder text = new StringBuilder(r.method()).append(' ').append(r.host()).append(r.path())
+                .append("\nTrasporto: ").append(r.decrypted() ? "TLS decifrato con le chiavi fornite" : "inviata in chiaro (HTTP)")
+                .append("\nApp: ").append(r.app() == null ? "non indicata" : r.app().toString());
+        if (!r.headerNames().isEmpty()) text.append("\nIntestazioni presenti: ").append(String.join(", ", r.headerNames()));
+        if (!r.referer().isEmpty()) text.append("\nReferer: ").append(r.referer());
+        if (!r.origin().isEmpty()) text.append("\nOrigin: ").append(r.origin());
+        if (!r.contentType().isEmpty()) text.append("\nContent-Type: ").append(r.contentType());
+        text.append("\n\nCorpo (").append(r.bodyBytes()).append(" byte").append(r.bodyTruncated() ? ", troncato" : "").append("):\n");
+        text.append(r.bodyBinary() ? "(contenuto binario, non mostrato)" : r.bodyBytes() == 0 ? "(nessun corpo)" : r.body());
+        return text.toString();
     }
     /** Provenance and limits of the imported capture, shown above the tables so results are never read without them. */
     private static String describe(CaptureAnalysis result) {
