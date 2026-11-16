@@ -94,8 +94,8 @@ public final class NetworkAssessmentService {
             scanParameters(queryOf(request.referer()), found);
             if (looksLikeForm(request)) scanParameters(request.body(), found);
             String bodyAndQuery = request.path() + " " + request.referer() + " " + request.body();
-            if (EMAIL.matcher(bodyAndQuery).find()) found.computeIfAbsent("contatto", ignored -> new TreeSet<>()).add("(valore con forma di indirizzo email)");
-            if (request.hasHeader("authorization")) found.computeIfAbsent("credenziale", ignored -> new TreeSet<>()).add("(intestazione Authorization)");
+            if (EMAIL.matcher(bodyAndQuery).find()) found.computeIfAbsent("contatto", ignored -> new TreeSet<>()).add(EMAIL_MARK);
+            if (request.hasHeader("authorization")) found.computeIfAbsent("credenziale", ignored -> new TreeSet<>()).add(AUTHORIZATION_MARK);
             if (found.isEmpty()) continue;
             String host = request.host().isEmpty() ? request.destination() : request.host();
             Hit hit = hits.computeIfAbsent(label(request.app()) + "|" + host,
@@ -111,11 +111,26 @@ public final class NetworkAssessmentService {
             rule.add(new Finding("NET-004", "1", Finding.Severity.MEDIUM, Finding.Confidence.LOW, h.label(),
                     h.count()[0] + (h.count()[0] == 1 ? " richiesta" : " richieste") + " con dati che per nome o forma suggeriscono informazioni personali ("
                             + what + "). " + (h.clearText()[0] ? "Almeno una è stata inviata senza cifratura. " : "Lette grazie alle chiavi TLS fornite: in rete erano cifrate. ")
-                            + "Il nome di un parametro non dimostra cosa contiene: \"lat\" può essere una latenza, e un identificativo può essere casuale. "
-                            + "I valori non sono riportati qui.",
+                            + caveats(h.byCategory()) + "I valori non sono riportati qui.",
                     "Cercare la richiesta nella scheda Richieste HTTP, leggere il valore (indirizzo, corpo, intestazioni) e chiedersi se quella destinazione ha motivo di riceverlo."));
         });
         addBounded("NET-004", rule, findings);
+    }
+
+    private static final String AUTHORIZATION_MARK = "(intestazione Authorization)";
+    private static final String EMAIL_MARK = "(valore con forma di indirizzo email)";
+
+    /** One caution per kind of evidence actually found, so the text never talks about parameters when there are none. */
+    private static String caveats(Map<String, Set<String>> byCategory) {
+        var names = byCategory.values().stream().flatMap(Set::stream).toList();
+        var text = new StringBuilder();
+        if (names.stream().anyMatch(n -> !n.startsWith("(")))
+            text.append("Il nome di un parametro non dimostra cosa contiene: \"lat\" può essere una latenza, e un identificativo può essere casuale. ");
+        if (names.contains(AUTHORIZATION_MARK))
+            text.append("Un'intestazione Authorization è normale verso il servizio a cui l'app è autenticata (per esempio un browser con un account collegato): conta a chi viene inviata, non che esista. ");
+        if (names.contains(EMAIL_MARK))
+            text.append("Un valore con forma di indirizzo email può essere anche un identificativo tecnico. ");
+        return text.toString();
     }
 
     private static String queryOf(String urlOrPath) {
