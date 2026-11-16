@@ -56,7 +56,7 @@ public final class NetworkAssessmentService {
             findings.add(new Finding("DATA-007", "1", Finding.Severity.INFO, Finding.Confidence.HIGH, CAPTURE,
                     "Chiavi TLS fornite: contenuto HTTP leggibile in " + tls.decrypted() + " connessioni TLS su " + tls.connections()
                             + ". Le altre restano cifrate (app che rifiutano il certificato di intercettazione, protocolli diversi da HTTP, chiavi mancanti); "
-                            + "il traffico QUIC non è decifrato. Sono esaminati gli indirizzi delle richieste, non il corpo né le intestazioni.",
+                            + "il traffico QUIC non è decifrato. Delle richieste leggibili sono esaminati indirizzo, intestazioni e corpo lato richiesta; non il corpo né le intestazioni delle risposte.",
                     "Per le connessioni rimaste cifrate non dedurre nulla dall'assenza di osservazioni NET-004."));
 
         var conversations = conversations(analysis.flows());

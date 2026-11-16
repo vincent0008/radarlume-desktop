@@ -29,8 +29,63 @@ class AdbTest {
         var apps = adapter.inventory("ABC123");
         assertEquals(List.of(new InstalledApp("android", true), new InstalledApp("com.example.app", false)), apps);
         assertEquals(List.of("C:\\Android SDK\\adb.exe", "-s", "ABC123", "shell", "pm", "list", "packages"), commands.getFirst());
+        assertEquals(List.of("C:\\Android SDK\\adb.exe", "-s", "ABC123", "shell", "dumpsys", "package"), commands.getLast());
         assertThrows(ScanException.class, () -> adapter.inventory("abc;reboot"));
-        assertEquals(2, commands.size());
+        assertEquals(3, commands.size());
+    }
+    @Test void inventoryStaysValidWhenMetadataCollectionFails() {
+        var adapter = new AdbDeviceInspector("adb", (args, timeout) -> {
+            if (args.getLast().equals("package")) throw new ScanException("dumpsys non disponibile");
+            return args.getLast().equals("-s") ? "" : "package:com.example.app\n";
+        });
+        var apps = adapter.inventory("ABC123");
+        assertEquals(List.of(new InstalledApp("com.example.app", false)), apps);
+        assertEquals(AppMetadata.UNKNOWN, apps.getFirst().metadata());
+    }
+    @Test void parsesVersionOriginAndPermissionsAndStopsAtHiddenPackages() {
+        String dumpsys = """
+            Packages:
+              Package [com.example.app] (abc123):
+                userId=10194
+                versionCode=45 minSdk=23 targetSdk=33
+                versionName=4.5.0
+                installerPackageName=com.android.vending
+                requested permissions:
+                  android.permission.INTERNET
+                  android.permission.ACCESS_FINE_LOCATION
+                  android.permission.CAMERA
+                install permissions:
+                  android.permission.INTERNET: granted=true
+                User 0:
+                  gids=[3003]
+                  runtime permissions:
+                    android.permission.ACCESS_FINE_LOCATION: granted=true, flags=[ USER_SET ]
+                    android.permission.CAMERA: granted=false
+              Package [com.side.loaded] (def456):
+                versionName=1.0
+                installerPackageName=null
+                requested permissions:
+                  android.permission.READ_SMS
+                install permissions:
+                  android.permission.READ_SMS: granted=true
+            Hidden system packages:
+              Package [com.example.app] (ghost):
+                versionName=0.0.0
+            """;
+        var map = AdbParser.appMetadata(dumpsys);
+        assertEquals(2, map.size());
+        var app = map.get("com.example.app");
+        assertEquals("4.5.0", app.versionName());
+        assertEquals(45L, app.versionCode());
+        assertEquals("com.android.vending", app.installer());
+        assertTrue(app.requestedPermissions().contains("android.permission.CAMERA"));
+        assertTrue(app.hasGranted("ACCESS_FINE_LOCATION"));
+        assertFalse(app.hasGranted("CAMERA"));
+        assertEquals("", map.get("com.side.loaded").installer());
+        assertTrue(map.get("com.side.loaded").hasGranted("READ_SMS"));
+    }
+    @Test void unrecognizedDumpsysYieldsEmptyMetadataWithoutThrowing() {
+        assertTrue(AdbParser.appMetadata("error: device offline").isEmpty());
     }
     @Test void emptyInventoryIsNotReportedAsSuccess() {
         var adapter = new AdbDeviceInspector("adb", (args, timeout) -> "");

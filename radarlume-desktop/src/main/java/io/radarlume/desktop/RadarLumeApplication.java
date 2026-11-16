@@ -3,6 +3,7 @@ package io.radarlume.desktop;
 import io.radarlume.adb.AdbDeviceInspector;
 import io.radarlume.adb.AdbSecurityEvidenceCollector;
 import io.radarlume.application.AndroidAssessmentService;
+import io.radarlume.application.AppInventoryAssessmentService;
 import io.radarlume.application.DeviceScanService;
 import io.radarlume.application.NetworkAssessmentService;
 import io.radarlume.domain.*;
@@ -113,10 +114,12 @@ public final class RadarLumeApplication extends Application {
         FilteredList<InstalledApp> filtered = new FilteredList<>(apps);
         filter.textProperty().addListener((o, a, value) -> filtered.setPredicate(app -> app.packageName().toLowerCase(java.util.Locale.ROOT).contains(value.toLowerCase(java.util.Locale.ROOT))));
         TableView<InstalledApp> table = new TableView<>(filtered);
-        table.getColumns().add(column("Pacchetto", InstalledApp::packageName, 620));
-        table.getColumns().add(column("Tipo", a -> a.system() ? "Sistema" : "Utente", 160));
+        table.getColumns().add(column("Pacchetto", InstalledApp::packageName, 430));
+        table.getColumns().add(column("Tipo", a -> a.system() ? "Sistema" : "Utente", 90));
+        table.getColumns().add(column("Versione", a -> a.metadata().versionName().isEmpty() ? "—" : a.metadata().versionName(), 130));
+        table.getColumns().add(column("Origine", RadarLumeApplication::origin, 230));
         table.setPlaceholder(new Label("L'inventario apparirà qui dopo una lettura autorizzata."));
-        Label note = new Label("Nomi tecnici dei pacchetti e classificazione sistema/utente. Nessuna analisi dei permessi o verdetto malware in questa versione."); note.setWrapText(true);
+        Label note = new Label("Pacchetti, tipo, versione e origine di installazione (letti da dumpsys package, best-effort). I permessi e l'origine sono valutati dai controlli Android; un'origine o un permesso non sono di per sé un verdetto malware."); note.setWrapText(true);
         Button assess = new Button("Controlli Android");
         assess.disableProperty().bind(busy.or(consent.selectedProperty().not()).or(devices.valueProperty().isNull()));
         assess.setOnAction(event -> {
@@ -129,14 +132,20 @@ public final class RadarLumeApplication extends Application {
                 result.evidence().forEach(e -> text.append(e.key()).append(": ").append(e.status() == Evidence.Status.AVAILABLE ? e.value() : "NON DISPONIBILE")
                     .append("\nFonte: ").append(e.source()).append("\nData UTC: ").append(e.collectedAt()).append("\n\n"));
                 text.append("VALUTAZIONI\n");
-                result.findings().forEach(f -> text.append(f.ruleId()).append(" v").append(f.ruleVersion()).append(" · ").append(f.severity())
+                var findings = new java.util.ArrayList<>(result.findings());
+                Inventory snapshot = inventory;
+                if (snapshot != null && snapshot.device().serial().equals(result.serial()))
+                    findings.addAll(AppInventoryAssessmentService.evaluate(snapshot.apps(), result.serial()));
+                else
+                    text.append("Metadati app non valutati: leggere prima l'inventario con \"Leggi inventario\" per analizzare origine e permessi.\n\n");
+                findings.forEach(f -> text.append(f.ruleId()).append(" v").append(f.ruleVersion()).append(" · ").append(f.severity())
                     .append(" · confidenza ").append(f.confidence()).append(" · evidenza ").append(f.evidenceKey())
                     .append("\n").append(f.explanation()).append("\n").append(f.nextStep()).append("\n\n"));
-                text.append("Nessun verdetto di assenza di malware: questi controlli coprono solo patch dichiarate e servizi di accessibilità configurati.");
+                text.append("Nessun verdetto di assenza di malware: questi controlli coprono patch dichiarate, servizi di accessibilità, origine delle app e permessi sensibili dichiarati.");
                 TextArea area = new TextArea(text.toString()); area.setEditable(false); area.setWrapText(true); area.setPrefSize(780,500);
                 Dialog<Void> dialog = new Dialog<>(); dialog.setTitle("Evidenze e controlli Android"); dialog.getDialogPane().setContent(area);
                 dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE); dialog.setResizable(true); dialog.show();
-                status.setText("Controlli completati: " + result.findings().size() + " osservazioni. Nessun verdetto malware.");
+                status.setText("Controlli completati: " + findings.size() + " osservazioni. Nessun verdetto malware.");
             });
         });
         VBox pane = pane(new HBox(12, discover, devices), consent, new HBox(12, scan, save, assess), inventoryLabel, filter, table, note);
@@ -286,6 +295,18 @@ public final class RadarLumeApplication extends Application {
             label.setMinHeight(Region.USE_PREF_SIZE); label.setMaxWidth(Double.MAX_VALUE);
         }
         VBox box = new VBox(12, nodes); box.setPadding(new Insets(20)); return box;
+    }
+    private static String origin(InstalledApp app) {
+        String installer = app.metadata().installer();
+        if (!app.metadata().known()) return "metadati assenti";
+        return switch (installer) {
+            case "" -> "non registrata";
+            case "com.android.vending", "com.google.android.feedback" -> "Google Play";
+            case "com.sec.android.app.samsungapps", "com.samsung.android.app.appsstore" -> "Samsung Galaxy Store";
+            case "org.fdroid.fdroid", "org.fdroid.basic" -> "F-Droid";
+            case "com.amazon.venezia" -> "Amazon Appstore";
+            default -> installer;
+        };
     }
     private static <T> TableColumn<T,String> column(String title, Function<T,String> value, int width) {
         TableColumn<T,String> col = new TableColumn<>(title); col.setCellValueFactory(c -> new SimpleStringProperty(value.apply(c.getValue()))); col.setPrefWidth(width); return col;
