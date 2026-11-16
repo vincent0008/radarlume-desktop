@@ -25,8 +25,8 @@ Le porte isolano il dominio da ADB, TShark e JDBC. Sono ora presenti anche Setti
 |3|JavaFX e navigazione|Implementato|
 |4|SQLite e test base|Implementato; impostazioni persistenti v2|
 |5|Discovery e autorizzazione|Implementato; prima prova reale riuscita dell'utente|
-|6|Inventario e proprietà sistema|Parziale: nomi/tipo, versione Android/SDK/patch; mancano dettagli app|
-|7|Parser e metadati|Parziale: parser base, senza versioni/installatore/permessi app|
+|6|Inventario e proprietà sistema|Parziale: nomi/tipo, versione Android/SDK/patch; per app versione, origine di installazione e permessi letti da `dumpsys package` (non ancora persistiti nello storico)|
+|7|Parser e metadati|Parziale: parser pacchetti e metadati app (versione, installatore, permessi richiesti/concessi); regole AND-003 (origine) e AND-004 (permessi sensibili). Validato su fixture sintetici, non ancora su dispositivo reale|
 |8|Errori e versioni Android|Parziale: errori e dati mancanti; manca matrice OEM/versioni|
 |9|Regole Android iniziali|Implementate due regole euristiche, da validare sul campo|
 |10|Evidence e Finding|Implementati; persistenza da fare|

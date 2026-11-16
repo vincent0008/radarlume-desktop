@@ -17,7 +17,11 @@ In **Android**, seleziona il dispositivo, conferma l'autorizzazione e premi **Co
 
 - Discovery ADB con stati autorizzato, non autorizzato, offline e permessi mancanti.
 - Selezione esplicita e consenso prima dell'inventario; nuova verifica dello stato al momento della lettura.
-- Nomi dei pacchetti e classificazione sistema/utente, con filtro nella UI.
+- Nomi dei pacchetti e classificazione sistema/utente, con filtro nella UI; per ogni app anche **versione**, **origine di installazione** e **permessi** letti da `dumpsys package` (best-effort, non persistiti nello storico).
+- Controlli Android sui metadati app, nella finestra **Controlli Android**. Osservazioni, non verdetti:
+  - `AND-003`: app non di sistema installata da un'origine diversa dagli store conosciuti (origine non registrata o sideload). Confidenza bassa: il sideload è legittimo (F-Droid, APK diretti).
+  - `AND-004`: app non di sistema con almeno due categorie di permessi sensibili concessi (SMS, posizione, microfono, fotocamera, accessibilità…). Riporta nomi e categorie, mai l'uso; avere un permesso non dimostra come viene usato.
+  - `DATA-008`: metadati app non letti (versione/origine/permessi assenti): AND-003 e AND-004 non vengono eseguite.
 - Salvataggio volontario SQLite, caricamento dell'ultimo inventario e cancellazione dello storico con conferma.
 - Importazione PCAP/PCAPNG (anche esportati da PCAPdroid): flussi TCP/UDP IPv4/IPv6 aggregati per direzione, pacchetti, byte IP, primo/ultimo orario, nome TLS (SNI) in chiaro, nomi DNS in chiaro con indirizzi restituiti, impronta SHA-256 del file.
 - App associata al flusso solo se dichiarata dalla cattura stessa (estensioni PCAPdroid in formato PCAP); mai dedotta da IP o orari.
@@ -27,7 +31,7 @@ In **Android**, seleziona il dispositivo, conferma l'autorizzazione e premi **Co
   - `NET-003`: un'app contatta almeno 20 indirizzi remoti distinti. Informativa; richiede i metadati app.
   - `DATA-003`…`DATA-006`: cattura troncata, metadati app assenti, nessun pacchetto analizzabile, elenco limitato. Servono a non far passare un'analisi incompleta per un risultato pulito.
   - `NET-004`: richieste leggibili in cui l'indirizzo, il corpo, il Referer o un'intestazione `Authorization` contengono dati che per nome (`lat`, `adid`, `email`, `password`…) o forma (un indirizzo email) suggeriscono informazioni personali. Riporta nomi e conteggi, mai i valori. Confidenza bassa: il nome di un parametro non dimostra il contenuto.
-  - `DATA-007`: quante connessioni TLS sono diventate leggibili con le chiavi fornite e quante no.
+  - `DATA-007`: quante connessioni TLS sono diventate leggibili con le chiavi fornite e quante no. Delle richieste leggibili sono esaminati indirizzo, intestazioni e corpo lato richiesta; non le risposte.
   - Le soglie sono euristiche del progetto, da tarare con catture reali. Il contenuto rimasto cifrato non è esaminato.
 - Decrittazione TLS con chiavi fornite dall'utente: se accanto alla cattura c'è un file con lo stesso nome ed estensione `.keylog` (formato SSLKEYLOGFILE, scritto da PCAPdroid quando la sua decrittazione TLS è attiva), RadarLume lo passa a TShark e mostra le richieste HTTP/1 e HTTP/2 nella scheda **Richieste HTTP**, con metodo, host, percorso, intestazioni presenti, Referer, Content-Type e il **corpo delle richieste** (POST compresi). RadarLume non intercetta né forza nulla: legge solo ciò che le chiavi consentono. Disattivabile con la casella accanto al pulsante di importazione.
 - Operazioni fuori dal thread JavaFX, annullamento, timeout e limiti di output.

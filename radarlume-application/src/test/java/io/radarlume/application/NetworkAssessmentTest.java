@@ -72,6 +72,17 @@ class NetworkAssessmentTest {
         Finding track = byRule.get("NET-004").stream().filter(x -> x.evidenceKey().contains("track.test")).findFirst().orElseThrow();
         assertTrue(track.explanation().contains("forma di indirizzo email"));
     }
+    @Test void cautionMatchesTheKindOfEvidenceFound() {
+        var findings = NetworkAssessmentService.evaluate(withRequests(new CaptureAnalysis.Tls(true, 2, 2),
+                req("auth.test", "GET", "/me", true, "", "", List.of("authorization")),
+                req("ads.test", "GET", "/sync?adid=abc", true, "", "", List.of())));
+        Finding auth = findings.stream().filter(x -> x.evidenceKey().contains("auth.test")).findFirst().orElseThrow();
+        Finding ads = findings.stream().filter(x -> x.evidenceKey().contains("ads.test")).findFirst().orElseThrow();
+        assertTrue(auth.explanation().contains("conta a chi viene inviata"), auth.explanation());
+        assertFalse(auth.explanation().contains("nome di un parametro"), "Nessun parametro trovato: la cautela sui parametri non va mostrata");
+        assertTrue(ads.explanation().contains("nome di un parametro"));
+        assertFalse(ads.explanation().contains("conta a chi viene inviata"));
+    }
     @Test void jsonBodyIsNotMisreadAsFormParameters() {
         var request = new HttpRequest(Instant.EPOCH, "192.0.2.10", APP, "POST", "api.test", "/e", true, List.of(),
                 "", "", "application/json", "{\"note\":\"password=x should not count\"}", 36, false, false);

@@ -4,6 +4,7 @@ import io.radarlume.domain.*;
 import io.radarlume.process.CommandRunner;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 
 public final class AdbDeviceInspector implements DeviceInspector {
     private final String executable;
@@ -20,6 +21,17 @@ public final class AdbDeviceInspector implements DeviceInspector {
         var system = AdbParser.packages(runner.run(List.of(executable, "-s", serial, "shell", "pm", "list", "packages", "-s"), Duration.ofSeconds(30)));
         if (all.isEmpty()) throw new ScanException("Inventario vuoto: impossibile confermare la raccolta dei pacchetti.");
         if (!all.containsAll(system)) throw new ScanException("Inventario cambiato durante la lettura. Ripeti la scansione.");
-        return all.stream().map(name -> new InstalledApp(name, system.contains(name))).toList();
+        var metadata = metadata(serial);
+        return all.stream().map(name -> new InstalledApp(name, system.contains(name), metadata.getOrDefault(name, AppMetadata.UNKNOWN))).toList();
+    }
+
+    /** Metadati app best-effort: un errore qui non invalida l'inventario, i pacchetti restano senza metadati. */
+    private Map<String, AppMetadata> metadata(String serial) {
+        try {
+            return AdbParser.appMetadata(runner.run(
+                    List.of(executable, "-s", serial, "shell", "dumpsys", "package"), Duration.ofSeconds(60)));
+        } catch (RuntimeException e) {
+            return Map.of();
+        }
     }
 }
