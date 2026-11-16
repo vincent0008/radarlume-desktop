@@ -16,7 +16,7 @@ class TsharkTrafficAnalyzerTest {
     /** One TShark output line. Columns: time, addresses, ports, lengths, DNS, SNI, Ethernet trailer. */
     private static String line(String time, String src, String dst, String protocol, int sport, int dport, int bytes, String... extra) {
         boolean v6 = src.contains(":"), tcp = protocol.equals("TCP");
-        String[] f = new String[19];
+        String[] f = new String[25];
         Arrays.fill(f, "");
         f[0] = time; f[v6 ? 2 : 1] = src; f[v6 ? 4 : 3] = dst;
         f[tcp ? 5 : 7] = Integer.toString(sport); f[tcp ? 6 : 8] = Integer.toString(dport);
@@ -50,7 +50,7 @@ class TsharkTrafficAnalyzerTest {
     }
     @Test void collectsDnsNamesSeparatingQueriesFromAnswers() {
         var analysis = parse(line("1", "10.0.0.1", "10.0.0.2", "UDP", 40000, 53, 60, "12", "Example.TEST", "13", "False")
-                + line("2", "10.0.0.2", "10.0.0.1", "UDP", 53, 40000, 90, "12", "example.test", "13", "True", "14", "192.0.2.10,192.0.2.11", "15", "2001:db8::10")
+                + line("2", "10.0.0.2", "10.0.0.1", "UDP", 53, 40000, 90, "12", "example.test", "13", "True", "14", "192.0.2.10 192.0.2.11", "15", "2001:db8::10")
                 + line("3", "10.0.0.1", "10.0.0.2", "UDP", 40001, 53, 60, "12", "unanswered.test", "13", "False"));
         assertEquals(2, analysis.dnsNames().size());
         var answered = analysis.dnsNames().getFirst();
@@ -70,6 +70,11 @@ class TsharkTrafficAnalyzerTest {
         String trailer = "010720210000278b636f6d2e6578616d706c652e62726f7773657200";
         assertEquals(new CaptureApp(10123, "com.example.browser"), TsharkTrafficAnalyzer.pcapdroidApp(trailer));
         assertEquals(new CaptureApp(10123, "com.example.browser"), TsharkTrafficAnalyzer.pcapdroidApp("00:00:01:07:20:21:00:00:27:8b:63:6f:6d:2e:65:78:61:6d:70:6c:65:2e:62:72:6f:77:73:65:72:00"));
+        // Taken from a real PCAPdroid capture: display names with spaces, zero padding before the magic, name cut at 19 bytes.
+        assertEquals(new CaptureApp(10320, "AVG AntiVirus"), TsharkTrafficAnalyzer.pcapdroidApp("0000010720210000285041564720416e7469566972757300000000000000"));
+        assertEquals(new CaptureApp(10167, "Google Play Service"), TsharkTrafficAnalyzer.pcapdroidApp("01072021000027b7476f6f676c6520506c6179205365727669636500"));
+        assertEquals(new CaptureApp(10001, "Caff"), TsharkTrafficAnalyzer.pcapdroidApp("010720210000271143616666c3" + "00".repeat(15)), "Half a UTF-8 character is dropped");
+        assertEquals(new CaptureApp(10001, ""), TsharkTrafficAnalyzer.pcapdroidApp("0107202100002711410a42" + "00".repeat(17)), "Control characters are not shown");
         assertNull(TsharkTrafficAnalyzer.pcapdroidApp("01072021ffffffff" + "00".repeat(20)), "UID -1 means unknown app");
         assertNull(TsharkTrafficAnalyzer.pcapdroidApp("0000000000000000"));
         assertNull(TsharkTrafficAnalyzer.pcapdroidApp(""));
@@ -80,6 +85,50 @@ class TsharkTrafficAnalyzerTest {
         var without = parse(line("1", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 40));
         assertEquals(CaptureAnalysis.AppMetadata.NONE, without.appMetadata());
         assertNull(without.flows().getFirst().app());
+    }
+    @Test void readsRequestsAndKeepsDecryptedOnesApartFromClearText() {
+        String tcp = "eth:ethertype:ip:tcp", trailer = "010720210000278b636f6d2e6578616d706c652e62726f7773657200";
+        var analysis = TsharkTrafficAnalyzer.parse(
+                line("1", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 300, "19", tcp + ":tls", "16", "shop.test", "17", trailer)
+                + line("2", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 300, "19", tcp + ":tls:http2", "17", trailer,
+                        "22", "GET POST", "23", "shop.test api.shop.test:8443", "24", "/a,b?x=1 /track?lat=45.1")
+                + line("3", "192.0.2.10", "10.0.0.1", "TCP", 443, 50000, 300, "19", tcp + ":tls:http2:json")
+                + line("4", "10.0.0.1", "192.0.2.11", "TCP", 50001, 443, 300, "19", tcp + ":tls:http", "18", "old.test", "20", "GET", "21", "/h1")
+                + line("5", "10.0.0.1", "192.0.2.12", "TCP", 50002, 443, 300, "19", tcp + ":tls:x509sat:x509ce")
+                + line("6", "10.0.0.1", "192.0.2.13", "TCP", 50003, 80, 300, "19", tcp + ":http", "18", "plain.test", "20", "GET", "21", "/clear\u0001" + "x".repeat(3000)),
+                "test.pcap", 1, "hash", false, true);
+        assertEquals(new CaptureAnalysis.Tls(true, 3, 2), analysis.tls(), "Certificates seen in a TLS 1.2 handshake are not decrypted content");
+        var requests = analysis.requests();
+        assertEquals(4, requests.size());
+        assertEquals(List.of("GET", "POST", "GET", "GET"), requests.stream().map(HttpRequest::method).toList());
+        assertEquals("/a,b?x=1", requests.get(0).path(), "A comma inside a path does not split it");
+        assertEquals("api.shop.test", requests.get(1).host()); assertEquals("/track?lat=45.1", requests.get(1).path());
+        assertTrue(requests.get(1).decrypted()); assertEquals(10123, requests.get(1).app().uid());
+        assertEquals("old.test", requests.get(2).host()); assertTrue(requests.get(2).decrypted());
+        assertFalse(requests.get(3).decrypted());
+        assertTrue(requests.get(3).path().startsWith("/clear?x") && requests.get(3).path().length() == TsharkTrafficAnalyzer.MAX_PATH_CHARS + 1);
+        assertEquals("", analysis.flows().get(2).httpHost(), "A Host header read with the keys is not clear-text HTTP");
+        assertEquals("plain.test", analysis.flows().getLast().httpHost());
+
+        var useless = TsharkTrafficAnalyzer.parse(line("1", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 300, "19", tcp + ":tls"), "test.pcap", 1, "hash", false, true);
+        assertTrue(useless.warnings().stream().anyMatch(w -> w.contains("altra cattura")));
+        assertFalse(parse(line("1", "10.0.0.1", "192.0.2.10", "TCP", 50000, 443, 300, "19", tcp + ":tls")).tls().keylogUsed());
+    }
+    @Test void passesAValidatedKeylogToTheDecoder() throws Exception {
+        Path capture = Files.write(temp.resolve("capture.pcap"), new byte[]{1});
+        Path keylog = Files.writeString(temp.resolve("keys with spaces.keylog"), "# comment\n\nCLIENT_RANDOM 00ff 11ee\n");
+        List<List<String>> seen = new ArrayList<>();
+        var analyzer = new TsharkTrafficAnalyzer("tshark", (args, timeout) -> { seen.add(args); return ""; });
+        assertTrue(analyzer.analyze(capture, keylog).tls().keylogUsed());
+        int option = seen.getFirst().indexOf("-o");
+        assertEquals("tls.keylog_file:" + keylog.toAbsolutePath(), seen.getFirst().get(option + 1));
+        assertFalse(analyzer.analyze(capture).tls().keylogUsed());
+        assertFalse(seen.getLast().contains("-o"));
+
+        Path notKeys = Files.writeString(temp.resolve("notes.txt"), "these are not keys\n");
+        assertThrows(ScanException.class, () -> analyzer.analyze(capture, notKeys));
+        assertThrows(ScanException.class, () -> analyzer.analyze(capture, temp.resolve("missing.keylog")));
+        assertEquals(2, seen.size(), "A rejected key file must not start the decoder");
     }
     @Test void passesCaptureAsSingleArgumentAndDisablesNameResolution() throws Exception {
         Path capture = Files.write(temp.resolve("capture with spaces.pcap"), new byte[]{1});

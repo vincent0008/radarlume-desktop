@@ -26,7 +26,10 @@ In **Android**, seleziona il dispositivo, conferma l'autorizzazione e premi **Co
   - `NET-002`: verso uno stesso indirizzo, almeno 512 KiB inviati e almeno il doppio del ricevuto. Confidenza bassa: backup, foto e chiamate producono lo stesso schema, e la direzione è stimata da porte e ordine dei pacchetti.
   - `NET-003`: un'app contatta almeno 20 indirizzi remoti distinti. Informativa; richiede i metadati app.
   - `DATA-003`…`DATA-006`: cattura troncata, metadati app assenti, nessun pacchetto analizzabile, elenco limitato. Servono a non far passare un'analisi incompleta per un risultato pulito.
-  - Le soglie sono euristiche del progetto, da tarare con catture reali. Nessuna regola esamina il contenuto cifrato.
+  - `NET-004`: richieste leggibili il cui indirizzo contiene parametri che per nome (`lat`, `adid`, `email`…) o forma (un indirizzo email) suggeriscono dati personali. Riporta nomi e conteggi, mai i valori. Confidenza bassa: il nome di un parametro non dimostra il contenuto.
+  - `DATA-007`: quante connessioni TLS sono diventate leggibili con le chiavi fornite e quante no.
+  - Le soglie sono euristiche del progetto, da tarare con catture reali. Il contenuto rimasto cifrato non è esaminato.
+- Decrittazione TLS con chiavi fornite dall'utente: se accanto alla cattura c'è un file con lo stesso nome ed estensione `.keylog` (formato SSLKEYLOGFILE, scritto da PCAPdroid quando la sua decrittazione TLS è attiva), RadarLume lo passa a TShark e mostra le richieste HTTP/1 e HTTP/2 nella scheda **Richieste HTTP**. RadarLume non intercetta né forza nulla: legge solo ciò che le chiavi consentono. Disattivabile con la casella accanto al pulsante di importazione.
 - Operazioni fuori dal thread JavaFX, annullamento, timeout e limiti di output.
 
 ## Prerequisiti
@@ -88,11 +91,13 @@ TShark usa `-n -r`, senza risoluzione di nomi né cattura live. Sono considerati
 
 Nomi DNS e SNI sono letti solo se in chiaro: DNS cifrato (DoH/DoT), ECH e QUIC non decodificato li nascondono, quindi una tabella vuota non indica assenza di traffico. Gli orari sono quelli scritti dal dispositivo di cattura. I nomi provenienti dalla cattura sono trattati come dati non fidati e sostituiti da un segnaposto se non hanno forma di nome host.
 
-Metadati app: sono letti dal trailer che PCAPdroid aggiunge con l'opzione *PCAPdroid extensions* nel formato PCAP (UID e nome pacchetto troncato a 19 caratteri). Il formato PCAPNG di PCAPdroid usa blocchi personalizzati che RadarLume non legge ancora: in quel caso nessuna attribuzione.
+Metadati app: sono letti dal trailer che PCAPdroid aggiunge con l'opzione *PCAPdroid extensions* nel formato PCAP (UID e nome visualizzato dell'app troncato a 19 byte; verificato su una cattura reale: la documentazione di PCAPdroid parla di nome del pacchetto, ma il file contiene ad esempio "Facebook"). Il formato PCAPNG di PCAPdroid usa blocchi personalizzati che RadarLume non legge ancora: in quel caso nessuna attribuzione.
 
 - Limite file: 100 MiB; limite output TShark: 64 MiB (una riga per pacchetto, circa mezzo milione di pacchetti); 50.000 flussi; 20.000 nomi DNS; timeout 90 secondi.
 - I limiti causano un errore, non risultati troncati presentati come completi. Unica eccezione: un file che termina a metà pacchetto viene importato per la parte leggibile ed è marcato come **parziale**; il superamento del limite dei nomi DNS è segnalato come avviso.
-- Nessuna decifratura TLS o estrazione dei contenuti. Nessuna attribuzione alle app oltre ai metadati dichiarati dalla cattura.
+- Decrittazione TLS: solo con il file `.keylog` (massimo 16 MiB, formato verificato prima dell'uso). Sono letti metodo, host e indirizzo delle richieste (massimo 20.000, indirizzo troncato a 2.000 caratteri); corpo, intestazioni, cookie e risposte non sono estratti. QUIC/HTTP3 non è decifrato. Le app che non accettano il certificato di PCAPdroid (la maggior parte, da Android 7, senza root) restano cifrate. Verificato su una sola cattura reale di Chrome (938 connessioni TLS leggibili su 1.172); nessun test automatico esegue una decrittazione vera, i test coprono il passaggio delle chiavi e la lettura dell'output.
+- Il file `.keylog` e le richieste decifrate contengono dati personali (indirizzi visitati, identificativi): restano in memoria, non vengono salvati nel database e `*.keylog` è escluso dal repository.
+- Nessuna attribuzione alle app oltre ai metadati dichiarati dalla cattura.
 - Un telefono collegato via USB non espone automaticamente il proprio traffico.
 - IOC, scoring, baseline, cattura live, salvataggio delle analisi di rete ed esportazione dei report sono ancora da implementare.
 

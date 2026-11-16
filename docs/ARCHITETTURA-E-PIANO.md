@@ -32,8 +32,8 @@ Le porte isolano il dominio da ADB, TShark e JDBC. Sono ora presenti anche Setti
 |10|Evidence e Finding|Implementati; persistenza da fare|
 |11|Severity e confidence|Implementati, senza punteggio probabilistico|
 |12|Test e dati simulati|Parziale: test sintetici; manca dataset rappresentativo|
-|13|Import PCAP/PCAPNG|Implementato; verificato con TShark reale su catture sintetiche nei formati PCAPdroid (IP grezzo, estensioni, file troncato). Cattura reale da telefono ancora da validare|
-|14|Flussi e DNS|Flussi direzionali con orari, SNI e app da metadati PCAPdroid; nomi DNS in chiaro; host delle richieste HTTP non cifrate. Prime regole di rete NET-001/002/003 in `NetworkAssessmentService`, con soglie euristiche da tarare. Risultati solo in memoria|
+|13|Import PCAP/PCAPNG|Implementato; verificato con TShark reale su catture sintetiche nei formati PCAPdroid (IP grezzo, estensioni, file troncato). Prima cattura reale da telefono importata (PCAP con estensioni, 62.705 pacchetti, 923 flussi, 1,6 s); un solo dispositivo e una sola versione di PCAPdroid|
+|14|Flussi e DNS|Flussi direzionali con orari, SNI e app da metadati PCAPdroid; nomi DNS in chiaro; host delle richieste HTTP non cifrate. Prime regole di rete NET-001/002/003 in `NetworkAssessmentService`, con soglie euristiche da tarare. Decrittazione TLS con file `.keylog` di PCAPdroid: richieste HTTP/1 e HTTP/2 leggibili e regola NET-004 sui parametri; corpo, intestazioni e QUIC non esaminati; provata su una sola cattura reale di Chrome. Risultati solo in memoria|
 |15|IOC con feed di test|Da fare|
 |16|Cattura live autorizzata|Da fare|
 |17|Associazione dispositivo/rete|Da fare|

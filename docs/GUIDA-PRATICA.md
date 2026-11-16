@@ -43,6 +43,23 @@ PCAPdroid è un'app di terzi che crea una VPN locale sul telefono: il traffico d
 4. Porta il file sul PC e importalo dalla scheda **Rete / PCAP**. Confronta l'impronta SHA-256 mostrata con quella del file originale se vuoi dimostrare che è lo stesso.
 5. Leggi prima il riquadro con intervallo, avvisi e limiti, poi le tabelle. Verifica che flussi, nomi DNS e app corrispondano a ciò che hai fatto davvero.
 
+### Leggere il contenuto cifrato (decrittazione TLS)
+
+TLS cifra il contenuto: senza chiavi si vede con chi parla un'app, non cosa dice. PCAPdroid può mettersi in mezzo alla connessione (tecnica *man-in-the-middle*) presentando all'app un certificato proprio, e scrivere le chiavi di sessione in un file `.keylog`. Con quel file TShark, e quindi RadarLume, decifra la cattura.
+
+1. In PCAPdroid attiva **Contenuto intero** e imposta **Blocca QUIC** su *Solo per connessioni da decrittare*. Lascia spento **Formato pcapng**.
+2. Attiva **Decrittazione TLS**. Se PCAPdroid viene dal Play Store la voce compare solo dopo aver installato a mano il componente `PCAPdroid-mitm` (file `arm64-v8a`) dalla pagina GitHub dell'autore.
+3. Segui la procedura: esporta il certificato e installalo da Impostazioni Android → *Crittografia e credenziali* → *Certificato CA*.
+4. Dal menu laterale aggiungi una **regola di decrittazione** per l'app da osservare, chiudila, avvia la cattura, usala, ferma.
+5. Copia sul PC, nella stessa cartella, il `.pcap` e il `.keylog` con lo stesso nome. Importando il `.pcap` RadarLume trova il `.keylog` da solo e lo dichiara nel riquadro di riepilogo.
+
+Limiti da tenere a mente:
+
+- Da Android 7 le app non si fidano dei certificati installati dall'utente. Senza root funziona con Chrome e poche altre; le app che verificano il proprio certificato (*pinning*) rifiutano la connessione e restano illeggibili. Un'app che non si lascia decifrare non è per questo sospetta.
+- QUIC non è decifrabile; bloccandolo molte app ripiegano su TLS.
+- Il `.keylog` permette a chiunque abbia anche il `.pcap` di leggere tutto, compresi cookie e credenziali: trattalo come una password, non condividerlo e non fare login durante le prove.
+- A prova finita rimuovi il certificato da Impostazioni Android → *Credenziali utente*.
+
 Cosa non concludere: una destinazione sconosciuta, molto traffico o un nome insolito non provano un'infezione. Con DNS privato (DoT) attivo su Android la tabella DNS può restare vuota. Gli indirizzi sorgente sono quelli interni della VPN di PCAPdroid, non quelli reali della rete.
 
 ## 5. Primo esercizio ripetibile

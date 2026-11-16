@@ -22,7 +22,36 @@ class NetworkAssessmentTest {
         return List.of(flow(PHONE, local, remote, remotePort, sent, 10, app, sni, http), flow(remote, remotePort, PHONE, local, received, 11, app, "", ""));
     }
     private static CaptureAnalysis capture(List<NetworkFlow> flows, CaptureAnalysis.AppMetadata metadata, boolean truncated) {
-        return new CaptureAnalysis("test.pcap", 1, "hash", flows.size(), Instant.EPOCH, Instant.EPOCH, metadata, truncated, flows, List.of(), List.of());
+        return new CaptureAnalysis("test.pcap", 1, "hash", flows.size(), Instant.EPOCH, Instant.EPOCH, metadata, truncated, flows, List.of(), List.of(),
+                CaptureAnalysis.Tls.NOT_EXAMINED, List.of());
+    }
+    private static CaptureAnalysis withRequests(CaptureAnalysis.Tls tls, HttpRequest... requests) {
+        var flows = List.of(flow(PHONE, 40000, "192.0.2.10", 443, 100, 10, APP, "", ""));
+        return new CaptureAnalysis("test.pcap", 1, "hash", 1, Instant.EPOCH, Instant.EPOCH, CaptureAnalysis.AppMetadata.PCAPDROID_TRAILER, false,
+                flows, List.of(), List.of(), tls, List.of(requests));
+    }
+    private static HttpRequest request(String host, String path, boolean decrypted) {
+        return new HttpRequest(Instant.EPOCH, "192.0.2.10", APP, "GET", host, path, decrypted);
+    }
+
+    @Test void parameterNamesSuggestingPersonalDataAreReportedWithoutTheirValues() {
+        var findings = NetworkAssessmentService.evaluate(withRequests(new CaptureAnalysis.Tls(true, 4, 3),
+                request("ads.test", "/sync?gdpr=1&Lat=45.4642&lon=9.19&device_id=abc123", true),
+                request("ads.test", "/sync?lat=45.4642", true),
+                request("mail.test", "/open?u=mario.rossi%40example.test", false),
+                request("plain.test", "/page?lat=&id=7&latency=30", true),
+                request("plain.test", "/no-query", true)));
+        assertEquals(List.of("DATA-007", "NET-004", "NET-004"), rules(findings));
+        assertTrue(findings.getFirst().explanation().contains("3 connessioni TLS su 4"));
+        Finding ads = findings.get(1), mail = findings.get(2);
+        assertEquals("com.example.app (UID 10123) → ads.test", ads.evidenceKey());
+        assertTrue(ads.explanation().startsWith("2 richieste"));
+        assertTrue(ads.explanation().contains("posizione: Lat, lat, lon") && ads.explanation().contains("device_id"));
+        assertTrue(ads.explanation().contains("in rete erano cifrate"));
+        assertFalse(ads.explanation().contains("45.4642") || ads.explanation().contains("abc123"), "Values must stay out of the findings");
+        assertTrue(mail.explanation().contains("forma di indirizzo email") && mail.explanation().contains("senza cifratura"));
+        assertFalse(mail.explanation().contains("mario"));
+        assertEquals(Finding.Confidence.LOW, ads.confidence());
     }
     private static List<String> rules(List<Finding> findings) { return findings.stream().map(Finding::ruleId).toList(); }
 

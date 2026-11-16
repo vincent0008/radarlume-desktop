@@ -40,6 +40,8 @@ public final class RadarLumeApplication extends Application {
     private static final java.time.format.DateTimeFormatter TIME = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(java.time.ZoneOffset.UTC);
     private final ObservableList<NetworkFlow> flows = FXCollections.observableArrayList();
     private final ObservableList<DnsName> dnsNames = FXCollections.observableArrayList();
+    private final ObservableList<HttpRequest> requests = FXCollections.observableArrayList();
+    private final CheckBox useKeylog = new CheckBox("Usa le chiavi TLS (.keylog) se presenti accanto alla cattura");
     private static final String NO_FINDINGS_YET = "Le osservazioni appariranno qui dopo l'importazione di una cattura.";
     private final TextArea networkFindings = new TextArea(NO_FINDINGS_YET);
     private final TabPane results = new TabPane();
@@ -144,7 +146,8 @@ public final class RadarLumeApplication extends Application {
         Label note = new Label("Importa soltanto catture che sei autorizzato ad analizzare, per esempio esportate da PCAPdroid. "
                 + "Il collegamento USB non rende automaticamente visibile il traffico del telefono. "
                 + "Sono aggregati i pacchetti TCP/UDP IPv4/IPv6 per direzione. L'app è mostrata solo se dichiarata dai metadati della cattura; "
-                + "i contenuti cifrati non vengono letti.");
+                + "i contenuti cifrati vengono letti solo se accanto alla cattura c'è il file .keylog con le chiavi TLS esportate da PCAPdroid. "
+                + "Le richieste decifrate possono contenere dati personali: restano in memoria e non vengono salvate.");
         note.setWrapText(true);
         networkLabel.setWrapText(true);
         Button open = button("Importa PCAP / PCAPNG", () -> {
@@ -152,10 +155,17 @@ public final class RadarLumeApplication extends Application {
             chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Catture di rete", "*.pcap", "*.pcapng", "*.cap"));
             var file = chooser.showOpenDialog(stage); if (file == null) return;
             var analyzer = new TsharkTrafficAnalyzer(tool(tsharkPath), new BoundedProcessRunner(TSHARK_OUTPUT_LIMIT));
-            flows.clear(); dnsNames.clear(); networkFindings.setText(NO_FINDINGS_YET); networkLabel.setText("Nessuna analisi completata");
-            run("Analisi cattura…", () -> { var analysis = analyzer.analyze(file.toPath()); return Map.entry(analysis, NetworkAssessmentService.evaluate(analysis)); }, done -> {
+            // PCAPdroid writes the TLS session keys next to the capture, with the same name and the .keylog extension.
+            String name = file.getName(); int dot = name.lastIndexOf('.');
+            Path sibling = file.toPath().resolveSibling((dot > 0 ? name.substring(0, dot) : name) + ".keylog");
+            Path keylog = useKeylog.isSelected() && java.nio.file.Files.isRegularFile(sibling) ? sibling : null;
+            flows.clear(); dnsNames.clear(); requests.clear(); networkFindings.setText(NO_FINDINGS_YET); networkLabel.setText("Nessuna analisi completata");
+            run(keylog == null ? "Analisi cattura…" : "Analisi cattura con chiavi TLS…", () -> { var analysis = analyzer.analyze(file.toPath(), keylog); return Map.entry(analysis, NetworkAssessmentService.evaluate(analysis)); }, done -> {
                 CaptureAnalysis result = done.getKey(); List<Finding> findings = done.getValue();
-                flows.setAll(result.flows()); dnsNames.setAll(result.dnsNames()); networkLabel.setText(describe(result));
+                flows.setAll(result.flows()); dnsNames.setAll(result.dnsNames()); requests.setAll(result.requests());
+                networkLabel.setText(describe(result) + "\n• " + (keylog != null ? "Chiavi TLS lette da " + keylog.getFileName() + ": contenuto HTTP leggibile in " + result.tls().decrypted() + " connessioni TLS su " + result.tls().connections() + "."
+                        : useKeylog.isSelected() ? "Nessun file " + sibling.getFileName() + " accanto alla cattura: il contenuto cifrato non è stato letto."
+                        : "Uso delle chiavi TLS disattivato: il contenuto cifrato non è stato letto."));
                 networkFindings.setText(describe(findings)); results.getSelectionModel().selectFirst();
                 long toCheck = findings.stream().filter(f -> f.ruleId().startsWith("NET-")).count();
                 status.setText(result.packets() == 0 ? "Nessun pacchetto TCP/UDP IP decodificabile. Non è un giudizio di sicurezza."
@@ -184,9 +194,19 @@ public final class RadarLumeApplication extends Application {
         dns.getColumns().add(column("Indirizzi nelle risposte", d -> String.join(", ", d.addresses()), 340));
         dns.getColumns().add(column("Primo (UTC)", d -> TIME.format(d.firstSeen()), 150));
         dns.setPlaceholder(new Label("Nessun nome DNS in chiaro da mostrare. Dopo un'importazione, con DNS cifrato è normale: non significa assenza di traffico."));
+        TableView<HttpRequest> http = new TableView<>(requests);
+        http.getColumns().add(column("Ora (UTC)", r -> TIME.format(r.time()), 150));
+        http.getColumns().add(column("App (metadati cattura)", r -> r.app() == null ? "" : r.app().toString(), 170));
+        http.getColumns().add(column("Trasporto", r -> r.decrypted() ? "TLS decifrato" : "IN CHIARO", 110));
+        http.getColumns().add(column("Metodo", HttpRequest::method, 70));
+        http.getColumns().add(column("Host", HttpRequest::host, 230));
+        http.getColumns().add(column("Percorso e parametri", HttpRequest::path, 700));
+        http.getColumns().add(column("Destinazione", HttpRequest::destination, 140));
+        http.setPlaceholder(new Label("Nessuna richiesta HTTP leggibile. Senza il file .keylog di PCAPdroid si vedono solo le richieste non cifrate."));
         networkFindings.setEditable(false); networkFindings.setWrapText(true);
-        results.getTabs().setAll(tab("Osservazioni", networkFindings), tab("Flussi", table), tab("Nomi DNS in chiaro", dns));
-        VBox pane = pane(note, open, networkLabel, results); VBox.setVgrow(results, Priority.ALWAYS); return pane;
+        results.getTabs().setAll(tab("Osservazioni", networkFindings), tab("Flussi", table), tab("Richieste HTTP", http), tab("Nomi DNS in chiaro", dns));
+        useKeylog.setSelected(true);
+        VBox pane = pane(note, new HBox(12, open, useKeylog), networkLabel, results); VBox.setVgrow(results, Priority.ALWAYS); return pane;
     }
     /** Provenance and limits of the imported capture, shown above the tables so results are never read without them. */
     private static String describe(CaptureAnalysis result) {
@@ -201,8 +221,9 @@ public final class RadarLumeApplication extends Application {
     /** Same layout as the Android checks: rule, version, severity, confidence, what it refers to, why, what to do next. */
     private static String describe(List<Finding> findings) {
         StringBuilder text = new StringBuilder("Le osservazioni indicano dove guardare meglio: non sono verdetti. Regole applicate: "
-                + "NET-001 HTTP in chiaro · NET-002 invio molto superiore alla ricezione · NET-003 molte destinazioni per app.\n\n");
-        if (findings.isEmpty()) text.append("Nessuna delle tre regole è scattata. Non equivale a \"nessun rischio\": il contenuto cifrato non è stato esaminato.\n");
+                + "NET-001 HTTP in chiaro · NET-002 invio molto superiore alla ricezione · NET-003 molte destinazioni per app · "
+                + "NET-004 parametri che suggeriscono dati personali nelle richieste leggibili.\n\n");
+        if (findings.stream().noneMatch(f -> f.ruleId().startsWith("NET-"))) text.append("Nessuna delle quattro regole è scattata. Non equivale a \"nessun rischio\": il contenuto rimasto cifrato non è stato esaminato.\n\n");
         findings.forEach(f -> text.append(f.ruleId()).append(" v").append(f.ruleVersion()).append(" · ").append(f.severity())
                 .append(" · confidenza ").append(f.confidence()).append("\nRiferimento: ").append(f.evidenceKey())
                 .append("\n").append(f.explanation()).append("\nVerifica: ").append(f.nextStep()).append("\n\n"));

@@ -24,6 +24,9 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
     static final int MAX_FLOWS = 50_000;
     static final int MAX_DNS_NAMES = 20_000;
     static final int MAX_ADDRESSES_PER_NAME = 32;
+    public static final long MAX_KEYLOG_BYTES = 16L * 1024 * 1024;
+    static final int MAX_REQUESTS = 20_000;
+    static final int MAX_PATH_CHARS = 2_000;
 
     /** Order matters: {@link #parse} reads the columns by these positions. */
     private static final List<String> FIELDS = List.of(
@@ -31,7 +34,12 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
             "tcp.srcport", "tcp.dstport", "udp.srcport", "udp.dstport",
             "frame.len", "ip.len", "ipv6.plen",
             "dns.qry.name", "dns.flags.response", "dns.a", "dns.aaaa",
-            "tls.handshake.extensions_server_name", "eth.trailer", "http.host");
+            "tls.handshake.extensions_server_name", "eth.trailer", "http.host",
+            "frame.protocols", "http.request.method", "http.request.uri",
+            "http2.headers.method", "http2.headers.authority", "http2.headers.path");
+    /** Repeated fields are joined with a space: unlike a comma it cannot appear inside a request path, a name or an address. */
+    private static final String MANY = " ";
+    private static final java.util.regex.Pattern KEYLOG_LINE = java.util.regex.Pattern.compile("[A-Z0-9_]+ [0-9a-fA-F]+ [0-9a-fA-F]+");
     /** ICMP errors quote the header of the packet they refer to: without the exclusion they would create fake flows. */
     private static final String FILTER = "(ip or ipv6) and (tcp or udp) and not icmp and not icmpv6";
     /** Magic number that opens the metadata PCAPdroid appends to each packet when its extensions are enabled. */
@@ -45,7 +53,7 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
         this.runner = runner;
     }
 
-    @Override public CaptureAnalysis analyze(Path capture) {
+    @Override public CaptureAnalysis analyze(Path capture, Path keylog) {
         long size;
         try {
             if (!Files.isRegularFile(capture) || !Files.isReadable(capture)) throw new ScanException("Cattura non leggibile.");
@@ -54,9 +62,14 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
         } catch (IOException e) {
             throw new ScanException("Impossibile leggere la cattura.", e);
         }
+        if (keylog != null) checkKeylog(keylog);
         String sha256 = sha256(capture);
         var command = new ArrayList<>(List.of(executable, "-n", "-r", capture.toAbsolutePath().toString(),
-                "-Y", FILTER, "-T", "fields", "-E", "separator=/t", "-E", "occurrence=a", "-E", "aggregator=,"));
+                "-Y", FILTER, "-T", "fields", "-E", "separator=/t", "-E", "occurrence=a", "-E", "aggregator=/s"));
+        if (keylog != null) {
+            command.add("-o");
+            command.add("tls.keylog_file:" + keylog.toAbsolutePath());
+        }
         for (String field : FIELDS) {
             command.add("-e");
             command.add(field);
@@ -72,7 +85,22 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
                         + BoundedProcessRunner.detail(result.stderr()) + ". Nessun risultato utilizzato.");
             truncated = true;
         }
-        return parse(result.stdout(), capture.getFileName().toString(), size, sha256, truncated);
+        return parse(result.stdout(), capture.getFileName().toString(), size, sha256, truncated, keylog != null);
+    }
+
+    /** The key file is as untrusted as the capture: bounded size and the expected line format, or nothing is used. */
+    private static void checkKeylog(Path keylog) {
+        try {
+            if (!Files.isRegularFile(keylog) || !Files.isReadable(keylog)) throw new ScanException("File delle chiavi TLS non leggibile.");
+            if (Files.size(keylog) > MAX_KEYLOG_BYTES) throw new ScanException("Il file delle chiavi TLS supera il limite di 16 MiB.");
+            try (var lines = Files.lines(keylog, StandardCharsets.ISO_8859_1)) {
+                boolean valid = lines.map(String::strip).filter(l -> !l.isEmpty() && !l.startsWith("#")).findFirst()
+                        .map(l -> KEYLOG_LINE.matcher(l).matches()).orElse(false);
+                if (!valid) throw new ScanException("Il file indicato non ha il formato di un file di chiavi TLS (SSLKEYLOGFILE).");
+            }
+        } catch (IOException | java.io.UncheckedIOException e) {
+            throw new ScanException("Impossibile leggere il file delle chiavi TLS.", e);
+        }
     }
 
     private static String sha256(Path capture) {
@@ -108,6 +136,14 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
     }
 
     public static CaptureAnalysis parse(String output, String fileName, long fileBytes, String sha256, boolean truncated) {
+        return parse(output, fileName, fileBytes, sha256, truncated, false);
+    }
+
+    public static CaptureAnalysis parse(String output, String fileName, long fileBytes, String sha256, boolean truncated, boolean keylogUsed) {
+        var requests = new ArrayList<HttpRequest>();
+        var tlsConnections = new HashSet<String>();
+        var decryptedConnections = new HashSet<String>();
+        boolean requestLimitHit = false;
         var flows = new LinkedHashMap<Key, FlowTotals>();
         var dns = new LinkedHashMap<String, DnsTotals>();
         long packets = 0;
@@ -142,11 +178,30 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
                 if (flow.first == null || time.isBefore(flow.first)) flow.first = time;
                 if (flow.last == null || time.isAfter(flow.last)) flow.last = time;
                 if (flow.serverName.isEmpty()) flow.serverName = name(first(f[16]));
-                if (flow.httpHost.isEmpty()) flow.httpHost = name(hostOnly(first(f[18])));
+                // Layers as decoded by TShark, e.g. "eth:ethertype:ip:tcp:tls:http2": HTTP after TLS means the keys worked.
+                String layers = ":" + first(f[19]) + ":";
+                boolean tls = tcp && layers.contains(":tls:"), readable = tls && layers.contains(":tls:http");
+                if (tls) {
+                    String connection = sp < dp || (sp == dp && src.compareTo(dst) < 0)
+                            ? src + " " + sport + " " + dst + " " + dport : dst + " " + dport + " " + src + " " + sport;
+                    tlsConnections.add(connection);
+                    if (readable) decryptedConnections.add(connection);
+                }
+                // A Host header read thanks to the keys was not sent in clear text: it must not look like one.
+                if (!tls && flow.httpHost.isEmpty()) flow.httpHost = name(hostOnly(first(f[18])));
 
                 CaptureApp app = pcapdroidApp(f[17]);
                 if (app != null || f[17].replace(":", "").contains(PCAPDROID_MAGIC)) trailerSeen = true;
                 if (flow.app == null) flow.app = app;
+
+                // HTTP/1 carries one request per packet; HTTP/2 can carry several, listed in the same order in the three fields.
+                boolean http1 = !f[20].isEmpty();
+                String[] methods = many(http1 ? f[20] : f[22]), hosts = many(http1 ? f[18] : f[23]), paths = many(http1 ? f[21] : f[24]);
+                for (int i = 0; i < methods.length; i++) {
+                    if (requests.size() >= MAX_REQUESTS) { requestLimitHit = true; break; }
+                    requests.add(new HttpRequest(time, dst, flow.app, token(methods[i]),
+                            name(hostOnly(i < hosts.length ? hosts[i] : "")), path(i < paths.length ? paths[i] : ""), tls));
+                }
 
                 String query = name(first(f[12]));
                 if (!query.isEmpty()) {
@@ -159,7 +214,7 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
                     if (total.last == null || time.isAfter(total.last)) total.last = time;
                     if (isTrue(first(f[13]))) {
                         total.responses++;
-                        for (String address : (f[14] + "," + f[15]).split(","))
+                        for (String address : (f[14] + MANY + f[15]).split(MANY))
                             if (!address.isBlank() && address.length() <= 45 && total.addresses.size() < MAX_ADDRESSES_PER_NAME)
                                 total.addresses.add(address);
                     } else {
@@ -175,9 +230,13 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
         if (truncated)
             warnings.add("File troncato: sono stati analizzati solo i pacchetti completi. Il risultato è parziale.");
         if (trailerSeen)
-            warnings.add("App indicate dai metadati PCAPdroid, non dedotte da RadarLume. Il formato tronca il nome del pacchetto a 19 caratteri.");
+            warnings.add("App indicate dai metadati PCAPdroid, non dedotte da RadarLume. È il nome visualizzato dell'app, troncato a 19 byte: per distinguere due app usare l'UID.");
         else
             warnings.add("La cattura non contiene metadati sulle app leggibili da RadarLume: nessuna attribuzione.");
+        if (requestLimitHit)
+            warnings.add("Elenco delle richieste HTTP incompleto: superato il limite di " + MAX_REQUESTS + ".");
+        if (keylogUsed && decryptedConnections.isEmpty())
+            warnings.add("Il file delle chiavi TLS non ha permesso di leggere alcuna connessione: potrebbe appartenere a un'altra cattura.");
         if (dnsLimitHit)
             warnings.add("Elenco DNS incompleto: superato il limite di " + MAX_DNS_NAMES + " nomi.");
         warnings.add("Nomi DNS e TLS sono visibili solo se trasmessi in chiaro: DNS cifrato (DoH/DoT) ed ECH li nascondono. L'assenza di un nome non prova l'assenza di una connessione.");
@@ -189,12 +248,22 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
                         e.getValue().first, e.getValue().last, e.getValue().app, e.getValue().serverName, e.getValue().httpHost)).toList(),
                 dns.entrySet().stream().map(e -> new DnsName(e.getKey(), e.getValue().queries, e.getValue().responses,
                         List.copyOf(e.getValue().addresses), e.getValue().first, e.getValue().last)).toList(),
-                warnings);
+                warnings, new CaptureAnalysis.Tls(keylogUsed, tlsConnections.size(), decryptedConnections.size()), requests);
     }
 
     private static String first(String aggregated) {
-        int comma = aggregated.indexOf(',');
-        return comma < 0 ? aggregated : aggregated.substring(0, comma);
+        int end = aggregated.indexOf(MANY);
+        return end < 0 ? aggregated : aggregated.substring(0, end);
+    }
+
+    private static String[] many(String aggregated) { return aggregated.isEmpty() ? new String[0] : aggregated.split(MANY); }
+
+    private static String token(String method) { return method.matches("[A-Za-z]{1,16}") ? method.toUpperCase(Locale.ROOT) : "(non valido)"; }
+
+    /** Request paths are shown to the user: keep printable ASCII only and bound the length. */
+    private static String path(String raw) {
+        String clean = raw.replaceAll("[^\\x21-\\x7e]", "?");
+        return clean.length() <= MAX_PATH_CHARS ? clean : clean.substring(0, MAX_PATH_CHARS) + "…";
     }
 
     /** The Host header may carry a port ("example.test:8080"); bracketed IPv6 literals are left to the name check. */
@@ -237,7 +306,7 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
      * Returns {@code null} when the packet has no trailer or the app is unknown.
      */
     static CaptureApp pcapdroidApp(String ethTrailer) {
-        String hex = ethTrailer.replace(":", "").replace(",", "").toLowerCase(Locale.ROOT);
+        String hex = ethTrailer.replace(":", "").replace(MANY, "").toLowerCase(Locale.ROOT);
         int start = hex.indexOf(PCAPDROID_MAGIC);
         while (start >= 0 && start % 2 != 0) start = hex.indexOf(PCAPDROID_MAGIC, start + 1);
         if (start < 0 || hex.length() < start + 56 || !hex.matches("[0-9a-f]+")) return null;
@@ -246,7 +315,8 @@ public final class TsharkTrafficAnalyzer implements TrafficAnalyzer {
         byte[] raw = HexFormat.of().parseHex(hex.substring(start + 16, start + 56));
         int length = 0;
         while (length < raw.length && raw[length] != 0) length++;
-        String name = new String(raw, 0, length, StandardCharsets.US_ASCII);
-        return new CaptureApp(uid, name.matches("[A-Za-z0-9_.]+") ? name : "");
+        // Real captures carry the display name ("AVG AntiVirus"), possibly cut in the middle of a UTF-8 character.
+        String name = new String(raw, 0, length, StandardCharsets.UTF_8).replace("�", "").strip();
+        return new CaptureApp(uid, name.chars().anyMatch(Character::isISOControl) ? "" : name);
     }
 }

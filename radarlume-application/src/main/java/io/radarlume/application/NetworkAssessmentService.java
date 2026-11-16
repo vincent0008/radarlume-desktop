@@ -51,11 +51,77 @@ public final class NetworkAssessmentService {
                     "La cattura non indica quale app ha generato il traffico: la regola NET-003 non è applicabile e le altre non distinguono le app.",
                     "In PCAPdroid attivare \"PCAPdroid extensions\" con formato PCAP e ripetere la cattura."));
 
+        var tls = analysis.tls();
+        if (tls.keylogUsed())
+            findings.add(new Finding("DATA-007", "1", Finding.Severity.INFO, Finding.Confidence.HIGH, CAPTURE,
+                    "Chiavi TLS fornite: contenuto HTTP leggibile in " + tls.decrypted() + " connessioni TLS su " + tls.connections()
+                            + ". Le altre restano cifrate (app che rifiutano il certificato di intercettazione, protocolli diversi da HTTP, chiavi mancanti); "
+                            + "il traffico QUIC non è decifrato. Sono esaminati gli indirizzi delle richieste, non il corpo né le intestazioni.",
+                    "Per le connessioni rimaste cifrate non dedurre nulla dall'assenza di osservazioni NET-004."));
+
         var conversations = conversations(analysis.flows());
         clearTextHttp(conversations, findings);
         uploadImbalance(conversations, findings);
         if (apps) manyDestinations(conversations, findings);
+        personalDataInRequests(analysis.requests(), findings);
         return List.copyOf(findings);
+    }
+
+    /** Parameter names that usually carry the kind of data in the key. Matching a name says nothing certain about the value. */
+    private static final Map<String, Set<String>> SENSITIVE_PARAMETERS = sensitiveParameters();
+    private static final java.util.regex.Pattern EMAIL = java.util.regex.Pattern.compile("[A-Za-z0-9._+-]+(@|%40)[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,}");
+
+    private static Map<String, Set<String>> sensitiveParameters() {
+        var map = new LinkedHashMap<String, Set<String>>();
+        map.put("posizione", Set.of("lat", "lon", "lng", "latitude", "longitude", "gps", "geolocation"));
+        map.put("identificativo del dispositivo o pubblicitario", Set.of("gaid", "aaid", "adid", "idfa", "ifa", "advertisingid", "androidid", "deviceid", "imei", "imsi", "macaddress"));
+        map.put("contatto", Set.of("email", "mail", "phone", "telephone", "msisdn", "phonenumber"));
+        map.put("credenziale", Set.of("password", "passwd", "pwd"));
+        return map;
+    }
+
+    /**
+     * NET-004: a request address carries a parameter whose name suggests personal data, or a value shaped like an e-mail address.
+     * Only names and counts are reported: the values stay in the capture.
+     */
+    private static void personalDataInRequests(List<HttpRequest> requests, List<Finding> findings) {
+        record Hit(String label, boolean[] clearText, int[] count, Map<String, Set<String>> byCategory) {}
+        var hits = new LinkedHashMap<String, Hit>();
+        for (var request : requests) {
+            int question = request.path().indexOf('?');
+            if (question < 0) continue;
+            String query = request.path().substring(question + 1);
+            var found = new LinkedHashMap<String, Set<String>>();
+            for (String pair : query.split("[&;]")) {
+                int equals = pair.indexOf('=');
+                // An empty value carries no data, whatever the parameter is called.
+                if (equals <= 0 || equals == pair.length() - 1) continue;
+                String shown = pair.substring(0, equals), normalised = shown.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
+                SENSITIVE_PARAMETERS.forEach((category, names) -> {
+                    if (names.contains(normalised)) found.computeIfAbsent(category, ignored -> new TreeSet<>()).add(shown.length() > 40 ? shown.substring(0, 40) : shown);
+                });
+            }
+            if (EMAIL.matcher(query).find()) found.computeIfAbsent("contatto", ignored -> new TreeSet<>()).add("(valore con forma di indirizzo email)");
+            if (found.isEmpty()) continue;
+            String host = request.host().isEmpty() ? request.destination() : request.host();
+            Hit hit = hits.computeIfAbsent(label(request.app()) + "|" + host,
+                    ignored -> new Hit(label(request.app()) + " → " + host, new boolean[1], new int[1], new TreeMap<>()));
+            hit.count()[0]++;
+            if (!request.decrypted()) hit.clearText()[0] = true;
+            found.forEach((category, names) -> hit.byCategory().computeIfAbsent(category, ignored -> new TreeSet<>()).addAll(names));
+        }
+        var rule = new ArrayList<Finding>();
+        hits.values().stream().sorted(Comparator.comparingInt((Hit h) -> h.count()[0]).reversed()).forEach(h -> {
+            var what = new StringJoiner("; ");
+            h.byCategory().forEach((category, names) -> what.add(category + ": " + String.join(", ", names)));
+            rule.add(new Finding("NET-004", "1", Finding.Severity.MEDIUM, Finding.Confidence.LOW, h.label(),
+                    h.count()[0] + (h.count()[0] == 1 ? " richiesta" : " richieste") + " con parametri che per nome o forma suggeriscono dati personali ("
+                            + what + "). " + (h.clearText()[0] ? "Almeno una è stata inviata senza cifratura. " : "Lette grazie alle chiavi TLS fornite: in rete erano cifrate. ")
+                            + "Il nome di un parametro non dimostra cosa contiene: \"lat\" può essere una latenza, e un identificativo può essere casuale. "
+                            + "I valori non sono riportati qui.",
+                    "Cercare la richiesta nella scheda Richieste HTTP, leggere il valore e chiedersi se quella destinazione ha motivo di riceverlo."));
+        });
+        addBounded("NET-004", rule, findings);
     }
 
     /** NET-001: an unencrypted HTTP request was decoded. This is an observation of fact, hence high confidence. */
